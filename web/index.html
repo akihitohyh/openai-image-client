@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenAI Image Client Web</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="card hero-panel">
+        <div class="hero-main">
+          <p class="hero-kicker">LOCAL TOOL / NEO-BRUTALISM UI</p>
+          <h1 class="hero-title">OpenAI Image Client</h1>
+          <p class="hero-desc">
+            本地网页版图片生成工具。所有设置只保存在当前浏览器；后端只做代理请求，不做备份、不存配置。
+          </p>
+        </div>
+        <div class="hero-side">
+          <div class="hero-note note-yellow">前端本地保存</div>
+          <div class="hero-note note-blue">后端仅转发请求</div>
+          <div class="hero-note note-white theme-note">
+            <span>DARK 模式</span>
+            <button id="themeToggle" class="toggle" type="button" aria-label="切换深色模式" aria-pressed="false">
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+          <div id="saveState" class="hero-note note-white">设置尚未修改</div>
+        </div>
+      </header>
+
+      <section class="stats-grid">
+        <article class="stat-card stat-yellow neo-interactive">
+          <div class="stat-label">运行状态</div>
+          <div id="statusBadge" class="status-badge status-queued">待命</div>
+        </article>
+        <article class="stat-card stat-blue neo-interactive">
+          <div class="stat-label">当前模型</div>
+          <div id="statModel" class="stat-value stat-value-text">gpt-image-2</div>
+        </article>
+        <article class="stat-card stat-green neo-interactive">
+          <div class="stat-label">输出规格</div>
+          <div id="statSize" class="stat-value stat-value-text">1024x1024</div>
+        </article>
+        <article class="stat-card stat-pink neo-interactive">
+          <div class="stat-label">生成数量</div>
+          <div id="statCount" class="stat-value">1</div>
+        </article>
+      </section>
+
+      <div class="app-grid">
+        <aside class="card sidebar-panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="card-title">连接设置</h2>
+              <p class="card-desc">字段与原 Python 脚本保持一致。</p>
+            </div>
+            <button id="resetSettingsBtn" class="btn btn-white neo-interactive btn-sm" type="button">清空本地设置</button>
+          </div>
+
+          <form id="settingsForm" class="settings-form" autocomplete="off">
+            <label class="field-block">
+              <span class="field-label">Base URL</span>
+              <input id="baseUrl" name="baseUrl" class="input-field" placeholder="https://your-api-host.com" />
+              <small class="field-help">支持 API 根地址或完整 `/v1/images/generations` 地址</small>
+            </label>
+
+            <label class="field-block">
+              <span class="field-label">API Key</span>
+              <input id="apiKey" name="apiKey" type="password" class="input-field" placeholder="sk-..." />
+            </label>
+
+            <label class="field-block">
+              <span class="field-label">Model</span>
+              <input id="model" name="model" class="input-field" placeholder="gpt-image-2" />
+            </label>
+
+            <section class="size-builder">
+              <div class="size-builder-head">
+                <span class="field-label">Size</span>
+                <span id="resolvedSizeBadge" class="mini-tag mini-tag-green">1024x1024</span>
+              </div>
+
+              <div class="tab-row">
+                <button id="sizeModePreset" class="tab active" type="button">预设尺寸</button>
+                <button id="sizeModeCustom" class="tab" type="button">自定义宽高</button>
+              </div>
+
+              <div id="presetSizePanel" class="size-panel">
+                <div class="field-row two-col">
+                  <label class="field-block">
+                    <span class="field-label">基准分辨率</span>
+                    <select id="presetBase" class="select-field">
+                      <option value="1K">1K</option>
+                      <option value="2K">2K</option>
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span class="field-label">图像比例</span>
+                    <select id="presetRatio" class="select-field">
+                      <option value="1:1">1:1</option>
+                      <option value="3:2">3:2</option>
+                      <option value="2:3">2:3</option>
+                      <option value="16:9">16:9</option>
+                      <option value="9:16">9:16</option>
+                      <option value="4:3">4:3</option>
+                      <option value="3:4">3:4</option>
+                      <option value="21:9">21:9</option>
+                    </select>
+                  </label>
+                </div>
+                <p class="size-help">16:9 与 9:16 仅在 2K 基准下可用；其他比例会自动规整为 16 的倍数。</p>
+              </div>
+
+              <div id="customSizePanel" class="size-panel hidden">
+                <div class="field-row two-col">
+                  <label class="field-block">
+                    <span class="field-label">宽度</span>
+                    <input id="customWidth" class="input-field" type="number" min="16" step="16" inputmode="numeric" placeholder="1024" />
+                  </label>
+                  <label class="field-block">
+                    <span class="field-label">高度</span>
+                    <input id="customHeight" class="input-field" type="number" min="16" step="16" inputmode="numeric" placeholder="1024" />
+                  </label>
+                </div>
+                <p class="size-help">自定义宽高只能填写 16 的倍数。</p>
+              </div>
+            </section>
+
+            <div class="field-row two-col">
+              <label class="field-block">
+                <span class="field-label">数量 n</span>
+                <input id="count" name="count" type="number" min="1" max="8" step="1" class="input-field" />
+                <small class="field-help">如果大于 1，会拆成多个独立串行任务逐张生成。</small>
+              </label>
+              <label class="field-block">
+                <span class="field-label">超时（秒）</span>
+                <input id="timeout" name="timeout" type="number" min="10" max="600" step="1" class="input-field" />
+              </label>
+            </div>
+          </form>
+
+          <div class="info-card">
+            <div class="info-card-title">请求规则</div>
+            <ul class="info-list">
+              <li>前端调用本地 `/api/generate`</li>
+              <li>后端转发到你填写的图片接口</li>
+              <li>页面不会在后端落盘保存设置</li>
+            </ul>
+          </div>
+        </aside>
+
+        <main class="main-column">
+          <section class="card composer-panel">
+            <div class="panel-head panel-head-stack">
+              <div>
+                <h2 class="card-title">提示词</h2>
+                <p class="card-desc">输入提示词后直接生成图片，错误信息会在当前页面显示。</p>
+              </div>
+              <div class="token-row">
+                <span id="summaryBaseUrl" class="mini-tag mini-tag-blue">Base URL 未填写</span>
+                <span id="summarySize" class="mini-tag mini-tag-green">尺寸 1024x1024</span>
+                <span id="summaryTimeout" class="mini-tag mini-tag-yellow">超时 120 秒</span>
+                <span id="summaryTheme" class="mini-tag mini-tag-white">LIGHT 模式</span>
+              </div>
+            </div>
+
+            <textarea id="prompt" class="textarea-field" placeholder="请输入生图提示词..."></textarea>
+
+            <div class="toolbar-row">
+              <button id="generateBtn" class="btn btn-yellow neo-interactive" type="button">生成图片</button>
+              <button id="fillExampleBtn" class="btn btn-blue neo-interactive btn-sm" type="button">填入示例</button>
+              <button id="clearPromptBtn" class="btn btn-white neo-interactive btn-sm" type="button">清空提示词</button>
+            </div>
+          </section>
+
+          <section class="card result-panel">
+            <div class="panel-head panel-head-stack">
+              <div>
+                <h2 class="card-title">结果</h2>
+                <p class="card-desc">新图会直接接在旧图右侧；点击左侧图片后，右侧显示详细信息与提示词。</p>
+              </div>
+              <div class="result-head-tools">
+                <button id="clearHistoryBtn" class="btn btn-white neo-interactive btn-sm" type="button">清空历史</button>
+                <div id="metaInfo" class="meta-info">尚未发起请求</div>
+              </div>
+            </div>
+
+            <div id="errorBox" class="error-box hidden"></div>
+
+            <div id="gallery" class="gallery empty">
+              <div class="empty-state">
+                <div class="empty-state-badge">READY</div>
+                <div class="empty-title">还没有生成结果</div>
+                <div class="empty-desc">填写连接设置与提示词后，点击“生成图片”。</div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <template id="imageCardTemplate">
+      <button class="image-card neo-interactive" type="button">
+        <div class="image-card-top">
+          <span class="image-index">#1</span>
+          <span class="image-chip image-chip-success">已完成</span>
+        </div>
+        <div class="image-frame">
+          <img alt="generated image" />
+          <div class="image-placeholder hidden"></div>
+        </div>
+      </button>
+    </template>
+
+    <template id="historyBoardTemplate">
+      <article class="history-board">
+        <div class="history-board-head">
+          <div class="history-board-title-wrap">
+            <div class="history-board-title">生成历史</div>
+            <div class="history-board-subtitle">左侧按生成顺序排列图片，右侧查看当前选中图片的详细信息</div>
+          </div>
+          <div class="history-board-count mini-tag mini-tag-blue">0 条任务</div>
+        </div>
+        <div class="history-board-body">
+          <div class="history-board-list"></div>
+          <aside class="history-detail">
+            <div class="history-detail-empty">点击左侧图片后，这里会显示详细信息和提示词。</div>
+          </aside>
+        </div>
+      </article>
+    </template>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="图片预览">
+      <div id="lightboxBackdrop" class="lightbox-backdrop"></div>
+      <div class="lightbox-shell">
+        <div class="lightbox-topbar">
+          <span id="lightboxCounter" class="mini-tag mini-tag-yellow">1 / 1</span>
+          <div class="lightbox-actions">
+            <button id="lightboxPrev" class="btn btn-white neo-interactive btn-sm" type="button">上一张</button>
+            <button id="lightboxNext" class="btn btn-white neo-interactive btn-sm" type="button">下一张</button>
+            <button id="lightboxClose" class="btn btn-pink neo-interactive btn-sm" type="button">关闭预览</button>
+          </div>
+        </div>
+        <div class="lightbox-panel">
+          <img id="lightboxImage" class="lightbox-image" alt="preview image" />
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "base_url": "https://your-api-host.com",
+  "api_key": "your_api_key",
+  "prompt": "A cinematic futuristic city at sunset",
+  "model": "gpt-image-2",
+  "size": "1920x1024",
+  "n": 1
+}
