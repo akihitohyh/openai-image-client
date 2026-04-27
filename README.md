@@ -35,13 +35,6 @@
 └── requirements.txt
 ```
 
-以下内容默认不建议提交到 GitHub，仓库已通过 `.gitignore` 忽略：
-
-- `config.local.json`
-- `config.json`
-- `outputs/`
-- `venv/` / `.venv/`
-- `__pycache__/`
 
 ---
 
@@ -127,9 +120,4 @@ http://127.0.0.1:8000
 
 ---
 
-## 发布到 GitHub 前的建议
 
-- 不要提交真实 `API Key`
-- 不要提交 `config.local.json`
-- 不要提交 `outputs/` 中的历史图片
-- 如果要开源，建议补充你自己的 `LICENSE`
