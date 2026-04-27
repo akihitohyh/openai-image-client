@@ -13,9 +13,9 @@ A lightweight OpenAI-compatible text-to-image / image-to-image client with two u
 
 It works well with OpenAI Images API-compatible gateways, proxies, or self-hosted relay services.
 
-## Web UI Screenshot
+## Updated Web UI Screenshot
 
-![OpenAI Image Client Web UI](assets/web-ui-home.png)
+![OpenAI Image Client Updated Web UI](assets/web-ui-image-mode.png)
 
 ---
 

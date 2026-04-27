@@ -13,9 +13,9 @@
 
 适合接兼容 OpenAI Images API 的中转服务、自建代理或网关。
 
-## Web UI 截图
+## 新版 Web UI 截图
 
-![OpenAI Image Client Web UI](assets/web-ui-home.png)
+![OpenAI Image Client 最新 Web UI](assets/web-ui-image-mode.png)
 
 ---
 
