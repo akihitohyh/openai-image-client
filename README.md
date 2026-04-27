@@ -2,6 +2,10 @@
 
 [English README](README_EN.md)
 
+## 在线试用
+
+🔗 https://image.hyhschool.com/
+
 一个简洁的 OpenAI 风格生图客户端，包含两种使用方式：
 
 1. Python CLI 脚本

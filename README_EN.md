@@ -2,6 +2,10 @@
 
 [中文说明](README.md)
 
+## Live Demo
+
+🔗 https://image.hyhschool.com/
+
 A lightweight OpenAI-compatible image generation client with two usage modes:
 
 1. Python CLI script
