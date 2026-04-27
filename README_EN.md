@@ -6,7 +6,7 @@
 
 🔗 https://image.hyhschool.com/
 
-A lightweight OpenAI-compatible image generation client with two usage modes:
+A lightweight OpenAI-compatible text-to-image / image-to-image client with two usage modes:
 
 1. Python CLI script
 2. Local Web UI
@@ -21,8 +21,10 @@ It works well with OpenAI Images API-compatible gateways, proxies, or self-hoste
 
 ## Features
 
-- Compatible with `POST /v1/images/generations`
-- Accepts either an API root URL or a full image generation endpoint
+- Compatible with `POST /v1/images/generations` and `POST /v1/images/edits`
+- Supports both text-to-image and image-to-image modes
+- Image-to-image supports reference upload, drag-and-drop, preview, and removal
+- Accepts either an API root URL or a full image endpoint
 - Includes both CLI and Web UI
 - Web settings are stored only in browser `localStorage`
 - The backend does not save frontend settings or create backups
@@ -94,6 +96,8 @@ python generate_image.py \
 ### Highlights
 
 - Neo-Brutalism style interface
+- Supports both text-to-image and image-to-image modes
+- Image-to-image supports reference upload, drag-and-drop, local preview, and removal
 - Image history stays in a single result area
 - Click an image to show details and prompt on the right
 - Built-in image preview
@@ -119,9 +123,22 @@ http://127.0.0.1:8000
 
 - `Base URL` can be an API root, for example `https://your-api-host.com`
 - It can also be a full endpoint, for example `https://your-api-host.com/v1/images/generations`
+- Image-to-image mode automatically switches to a compatible `images/edits` endpoint
+- Reference images are kept only in browser memory and are not backed up by the backend
 - If the upstream returns `b64_json`, the page displays it directly
 - If the upstream returns `url`, the backend downloads the image first and then returns it to the frontend
 - The backend does not store frontend input settings for you
+
+---
+
+## Changelog
+
+### 2026-04-28
+- Added image-to-image mode
+- Added reference image upload, drag-and-drop, local preview, and removal
+- Added mode, reference image, and prompt details in result history
+- Added OpenAI-compatible `images/edits` backend support
+- Kept multi-image requests running as sequential tasks with independent wait time and timeout tracking
 
 ---
 

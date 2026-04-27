@@ -6,7 +6,7 @@
 
 🔗 https://image.hyhschool.com/
 
-一个简洁的 OpenAI 风格生图客户端，包含两种使用方式：
+一个简洁的 OpenAI 风格文生图 / 图生图客户端，包含两种使用方式：
 
 1. Python CLI 脚本
 2. 本地 Web UI
@@ -21,7 +21,9 @@
 
 ## 特性
 
-- 兼容 `POST /v1/images/generations`
+- 兼容 `POST /v1/images/generations` 与 `POST /v1/images/edits`
+- 支持文生图 / 图生图双模式
+- 图生图支持参考图上传、拖拽、预览与移除
 - 支持填 API 根地址或完整图片接口地址
 - 同时提供 CLI 和 Web UI
 - Web 设置只保存在浏览器本地 `localStorage`
@@ -94,6 +96,8 @@ python generate_image.py \
 ### 特点
 
 - Neo-Brutalism 风格页面
+- 支持文生图 / 图生图双模式
+- 图生图支持上传参考图、拖拽上传、本地预览与移除
 - 图片历史保留在同一个结果区
 - 点击图片后右侧显示详细信息与提示词
 - 支持图片放大预览
@@ -119,9 +123,22 @@ http://127.0.0.1:8000
 
 - `Base URL` 可填 API 根地址，例如 `https://your-api-host.com`
 - 也可直接填完整接口地址，例如 `https://your-api-host.com/v1/images/generations`
+- 图生图模式会自动请求兼容的 `images/edits` 接口
+- 图生图参考图只保存在当前浏览器内存中，后端不做备份
 - 如果上游返回 `b64_json`，页面会直接显示
 - 如果上游返回 `url`，后端会先下载图片，再返回给前端显示
 - 后端不会替你保存前端输入的配置
+
+---
+
+## 更新记录
+
+### 2026-04-28
+- 新增图生图模式
+- 支持参考图上传、拖拽上传、本地预览与移除
+- 图生图结果详情中展示模式、参考图与提示词
+- 后端新增 OpenAI-compatible `images/edits` 请求支持
+- 保持多图串行任务、单独计算等待时间与超时
 
 ---
 

@@ -155,7 +155,7 @@
             <div class="panel-head panel-head-stack">
               <div>
                 <h2 class="card-title">提示词</h2>
-                <p class="card-desc">输入提示词后直接生成图片，错误信息会在当前页面显示。</p>
+                <p id="promptDesc" class="card-desc">输入提示词后直接生成图片，错误信息会在当前页面显示。</p>
               </div>
               <div class="token-row">
                 <span id="summaryBaseUrl" class="mini-tag mini-tag-blue">Base URL 未填写</span>
@@ -164,6 +164,37 @@
                 <span id="summaryTheme" class="mini-tag mini-tag-white">LIGHT 模式</span>
               </div>
             </div>
+
+            <section class="mode-builder">
+              <div class="mode-builder-head">
+                <span class="field-label">工作模式</span>
+                <span id="modeBadge" class="mini-tag mini-tag-blue">文生图</span>
+              </div>
+              <div class="tab-row">
+                <button id="imageModeGenerate" class="tab active" type="button">文生图</button>
+                <button id="imageModeEdit" class="tab" type="button">图生图</button>
+              </div>
+
+              <div id="editImagePanel" class="edit-image-panel hidden">
+                <input id="editImageInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" />
+                <div id="editImageDropzone" class="edit-image-dropzone neo-interactive" role="button" tabindex="0" aria-label="上传参考图">
+                  <div class="edit-image-dropzone-kicker">IMAGE TO IMAGE</div>
+                  <div class="edit-image-dropzone-title">点击上传参考图，或把图片拖到这里</div>
+                  <div class="edit-image-dropzone-desc">支持 PNG / JPG / WEBP，前端仅保存在当前浏览器内存中，不会在后端备份。</div>
+                </div>
+
+                <div id="editImagePreviewCard" class="edit-image-preview hidden">
+                  <div class="edit-image-preview-head">
+                    <div class="edit-image-preview-title">参考图预览</div>
+                    <button id="clearEditImageBtn" class="btn btn-white neo-interactive btn-sm" type="button">移除图片</button>
+                  </div>
+                  <div class="edit-image-preview-frame">
+                    <img id="editImagePreview" class="edit-image-preview-img" alt="reference image preview" />
+                  </div>
+                  <div id="editImageMeta" class="edit-image-meta">尚未选择图片</div>
+                </div>
+              </div>
+            </section>
 
             <textarea id="prompt" class="textarea-field" placeholder="请输入生图提示词..."></textarea>
 

@@ -7,6 +7,7 @@ const defaults = {
   count: 1,
   timeout: 120,
   prompt: '',
+  imageMode: 'generate',
   sizeMode: 'preset',
   presetBase: '1K',
   presetRatio: '1:1',
@@ -35,6 +36,8 @@ let historyEntries = [];
 let selectedHistoryId = null;
 let activePendingId = null;
 let activeTimerId = null;
+let editImageState = null;
+let dragDepth = 0;
 
 const els = {
   baseUrl: document.getElementById('baseUrl'),
@@ -62,7 +65,18 @@ const els = {
   summarySize: document.getElementById('summarySize'),
   summaryTimeout: document.getElementById('summaryTimeout'),
   summaryTheme: document.getElementById('summaryTheme'),
+  promptDesc: document.getElementById('promptDesc'),
+  modeBadge: document.getElementById('modeBadge'),
   themeToggle: document.getElementById('themeToggle'),
+  imageModeGenerate: document.getElementById('imageModeGenerate'),
+  imageModeEdit: document.getElementById('imageModeEdit'),
+  editImagePanel: document.getElementById('editImagePanel'),
+  editImageInput: document.getElementById('editImageInput'),
+  editImageDropzone: document.getElementById('editImageDropzone'),
+  editImagePreviewCard: document.getElementById('editImagePreviewCard'),
+  editImagePreview: document.getElementById('editImagePreview'),
+  editImageMeta: document.getElementById('editImageMeta'),
+  clearEditImageBtn: document.getElementById('clearEditImageBtn'),
   sizeModePreset: document.getElementById('sizeModePreset'),
   sizeModeCustom: document.getElementById('sizeModeCustom'),
   presetSizePanel: document.getElementById('presetSizePanel'),
@@ -125,6 +139,14 @@ function truncateMiddle(value, max = 34) {
   return `${value.slice(0, left)}…${value.slice(-right)}`;
 }
 
+function formatBytes(bytes) {
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size <= 0) return '0 B';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 ** 2)).toFixed(1)} MB`;
+}
+
 function formatClock(ms) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
@@ -149,6 +171,21 @@ function applyTheme(theme) {
   els.themeToggle.classList.toggle('active', nextTheme === 'dark');
   els.themeToggle.setAttribute('aria-pressed', String(nextTheme === 'dark'));
   els.summaryTheme.textContent = nextTheme === 'dark' ? 'DARK 模式' : 'LIGHT 模式';
+}
+
+function getModeLabel(mode) {
+  return mode === 'edit' ? '图生图' : '文生图';
+}
+
+function updatePromptPlaceholder(mode) {
+  els.prompt.placeholder = mode === 'edit'
+    ? '请输入你希望在参考图基础上生成的效果，例如：保留主体姿态，改成赛博朋克夜景风格...'
+    : '请输入生图提示词...';
+  els.promptDesc.textContent = mode === 'edit'
+    ? '上传一张参考图，再输入提示词进行图生图。错误信息会在当前页面显示。'
+    : '输入提示词后直接生成图片，错误信息会在当前页面显示。';
+  els.generateBtn.textContent = mode === 'edit' ? '开始图生图' : '生成图片';
+  els.modeBadge.textContent = getModeLabel(mode);
 }
 
 function getPresetSize(baseKey, ratioKey) {
@@ -202,6 +239,15 @@ function updateSizeModeUI(mode) {
   els.customSizePanel.classList.toggle('hidden', preset);
 }
 
+function updateImageModeUI(mode) {
+  const isEdit = mode === 'edit';
+  els.imageModeGenerate.classList.toggle('active', !isEdit);
+  els.imageModeEdit.classList.toggle('active', isEdit);
+  els.editImagePanel.classList.toggle('hidden', !isEdit);
+  updatePromptPlaceholder(mode);
+  renderEditImagePreview();
+}
+
 function currentState() {
   return {
     baseUrl: els.baseUrl.value.trim(),
@@ -210,6 +256,7 @@ function currentState() {
     count: clampInt(els.count.value || 1, 1, 8),
     timeout: clampInt(els.timeout.value || 120, 10, 600),
     prompt: els.prompt.value,
+    imageMode: els.imageModeEdit.classList.contains('active') ? 'edit' : 'generate',
     sizeMode: els.sizeModeCustom.classList.contains('active') ? 'custom' : 'preset',
     presetBase: els.presetBase.value,
     presetRatio: els.presetRatio.value,
@@ -245,6 +292,7 @@ function hydrateForm(state) {
   els.count.value = clampInt(state.count || defaults.count, 1, 8);
   els.timeout.value = clampInt(state.timeout || defaults.timeout, 10, 600);
   els.prompt.value = state.prompt || '';
+  updateImageModeUI(state.imageMode || defaults.imageMode);
   els.presetBase.value = state.presetBase || defaults.presetBase;
   syncPresetRatioAvailability();
   els.presetRatio.value = state.presetRatio || defaults.presetRatio;
@@ -269,6 +317,66 @@ function normalizeCountInput() {
 function normalizeTimeoutInput() {
   els.timeout.value = String(clampInt(els.timeout.value || 120, 10, 600));
   saveState(currentState());
+}
+
+function renderEditImagePreview() {
+  const active = currentState().imageMode === 'edit';
+  els.editImagePreviewCard.classList.toggle('hidden', !editImageState || !active);
+
+  if (!editImageState) {
+    els.editImageDropzone.classList.remove('is-filled');
+    els.editImageMeta.textContent = '尚未选择图片';
+    els.editImagePreview.removeAttribute('src');
+    return;
+  }
+
+  els.editImageDropzone.classList.add('is-filled');
+  els.editImagePreview.src = editImageState.dataUrl;
+  els.editImagePreview.alt = editImageState.name || 'reference image preview';
+  const parts = [
+    editImageState.name || 'reference-image',
+    editImageState.contentType || 'image/png',
+  ];
+  if (Number.isFinite(editImageState.size)) parts.push(formatBytes(editImageState.size));
+  els.editImageMeta.textContent = parts.join(' · ');
+}
+
+function setEditImageState(nextImage) {
+  editImageState = nextImage;
+  renderEditImagePreview();
+}
+
+function clearEditImageState() {
+  setEditImageState(null);
+  els.editImageInput.value = '';
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取图片失败，请重新选择文件'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleEditImageFile(file) {
+  if (!file) return;
+  const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
+  if (!allowedTypes.has(file.type)) {
+    throw new Error('图生图目前仅支持 PNG / JPG / WEBP');
+  }
+  if (file.size > 50 * 1024 * 1024) {
+    throw new Error('参考图不能超过 50 MB');
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+  setEditImageState({
+    name: file.name || 'reference-image',
+    contentType: file.type || 'image/png',
+    size: file.size,
+    dataUrl,
+  });
 }
 
 function bindAutosave() {
@@ -371,11 +479,12 @@ function renderEmptyHistory(message = '填写连接设置与提示词后，点�
 }
 
 function getPendingMeta(entry) {
-  return `模型：${entry.model} · 尺寸：${entry.size} · 当前任务：${entry.sequence}/${entry.total} · 已等待 ${formatClock(entry.elapsedMs || 0)}`;
+  return `模式：${getModeLabel(entry.mode)} · 模型：${entry.model} · 尺寸：${entry.size} · 当前任务：${entry.sequence}/${entry.total} · 已等待 ${formatClock(entry.elapsedMs || 0)}`;
 }
 
 function getSuccessMeta(entry) {
   const parts = [
+    `模式：${getModeLabel(entry.mode)}`,
     `完成时间：${formatDateTime(entry.createdAt)}`,
     `模型：${entry.model}`,
     `尺寸：${entry.size}`,
@@ -392,6 +501,7 @@ function getSuccessMeta(entry) {
 
 function getErrorMeta(entry) {
   const parts = [
+    `模式：${getModeLabel(entry.mode)}`,
     `失败时间：${formatDateTime(entry.createdAt)}`,
     `模型：${entry.model}`,
     `尺寸：${entry.size}`,
@@ -555,6 +665,11 @@ function renderHistoryDetail(container, entry, order) {
   orderTag.textContent = `序号 #${order}`;
   tagRow.appendChild(orderTag);
 
+  const modeTag = document.createElement('div');
+  modeTag.className = 'mini-tag mini-tag-white';
+  modeTag.textContent = getModeLabel(entry.mode);
+  tagRow.appendChild(modeTag);
+
   const statusBadge = document.createElement('div');
   statusBadge.className = `status-badge ${status.badgeClass}`;
   statusBadge.textContent = status.badgeText;
@@ -575,6 +690,32 @@ function renderHistoryDetail(container, entry, order) {
   promptContent.className = 'history-detail-text';
   promptContent.textContent = entry.prompt || '未填写提示词';
   promptBlock.appendChild(promptContent);
+
+  let referenceBlock = null;
+  if (entry.sourceImageDataUrl) {
+    referenceBlock = document.createElement('div');
+    referenceBlock.className = 'history-detail-reference';
+    referenceBlock.appendChild(createDetailLabel('参考图'));
+
+    const referencePreview = document.createElement('button');
+    referencePreview.className = 'history-detail-reference-preview';
+    referencePreview.type = 'button';
+    referencePreview.addEventListener('click', () => openLightbox([entry.sourceImageDataUrl], 0));
+
+    const referenceImage = document.createElement('img');
+    referenceImage.className = 'history-detail-reference-image';
+    referenceImage.src = entry.sourceImageDataUrl;
+    referenceImage.alt = entry.sourceImageName || 'reference image';
+    referencePreview.appendChild(referenceImage);
+    referenceBlock.appendChild(referencePreview);
+
+    const referenceMeta = document.createElement('div');
+    referenceMeta.className = 'history-detail-text';
+    referenceMeta.textContent = entry.sourceImageName
+      ? `参考图：${entry.sourceImageName}`
+      : '已上传参考图';
+    referenceBlock.appendChild(referenceMeta);
+  }
 
   const actions = document.createElement('div');
   actions.className = 'history-detail-actions';
@@ -607,6 +748,7 @@ function renderHistoryDetail(container, entry, order) {
     card.appendChild(tagRow);
     card.appendChild(metaBlock);
     card.appendChild(promptBlock);
+    if (referenceBlock) card.appendChild(referenceBlock);
     card.appendChild(errorBlock);
     if (actions.childNodes.length) card.appendChild(actions);
     container.appendChild(card);
@@ -617,6 +759,7 @@ function renderHistoryDetail(container, entry, order) {
   card.appendChild(tagRow);
   card.appendChild(metaBlock);
   card.appendChild(promptBlock);
+  if (referenceBlock) card.appendChild(referenceBlock);
   if (actions.childNodes.length) card.appendChild(actions);
   container.appendChild(card);
 }
@@ -708,6 +851,7 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
   const entry = {
     id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     status: 'pending',
+    mode: state.imageMode || 'generate',
     prompt: state.prompt.trim(),
     model: state.model || defaults.model,
     size: sizeValue,
@@ -718,6 +862,8 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
     elapsedMs: 0,
     images: [],
     errorMessage: '',
+    sourceImageDataUrl: state.imageMode === 'edit' ? (editImageState?.dataUrl || '') : '',
+    sourceImageName: state.imageMode === 'edit' ? (editImageState?.name || '') : '',
   };
 
   historyEntries = [...historyEntries, entry];
@@ -725,18 +871,28 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
   startRequestTimer(entry);
 
   try {
+    const requestPayload = {
+      base_url: state.baseUrl,
+      api_key: state.apiKey,
+      prompt: state.prompt,
+      model: state.model,
+      size: sizeValue,
+      n: 1,
+      timeout: state.timeout,
+      mode: state.imageMode || 'generate',
+    };
+    if (requestPayload.mode === 'edit' && editImageState) {
+      requestPayload.edit_image = {
+        name: editImageState.name,
+        content_type: editImageState.contentType,
+        data_url: editImageState.dataUrl,
+      };
+    }
+
     const response = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        base_url: state.baseUrl,
-        api_key: state.apiKey,
-        prompt: state.prompt,
-        model: state.model,
-        size: sizeValue,
-        n: 1,
-        timeout: state.timeout,
-      }),
+      body: JSON.stringify(requestPayload),
     });
 
     const data = await response.json().catch(() => ({}));
@@ -782,6 +938,10 @@ async function generate() {
     setStatus('warning', '缺少提示词');
     return showError('请输入提示词');
   }
+  if (state.imageMode === 'edit' && !editImageState) {
+    setStatus('warning', '缺少参考图');
+    return showError('图生图模式下请先上传一张参考图');
+  }
   if (size.error) {
     setStatus('warning', '尺寸配置错误');
     return showError(size.error);
@@ -824,6 +984,7 @@ async function generate() {
 
 function resetSettings() {
   localStorage.removeItem(STORAGE_KEY);
+  clearEditImageState();
   hydrateForm(defaults);
   clearError();
   els.metaInfo.textContent = '本地设置已清空，请重新填写连接信息';
@@ -842,6 +1003,7 @@ function init() {
   const state = loadState();
   hydrateForm(state);
   bindAutosave();
+  renderEditImagePreview();
 
   els.generateBtn.addEventListener('click', generate);
   els.fillExampleBtn.addEventListener('click', () => {
@@ -859,6 +1021,68 @@ function init() {
     const state = currentState();
     state.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     saveState(state);
+  });
+
+  els.imageModeGenerate.addEventListener('click', () => {
+    updateImageModeUI('generate');
+    saveState(currentState());
+  });
+  els.imageModeEdit.addEventListener('click', () => {
+    updateImageModeUI('edit');
+    saveState(currentState());
+  });
+
+  els.editImageDropzone.addEventListener('click', () => els.editImageInput.click());
+  els.editImageDropzone.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      els.editImageInput.click();
+    }
+  });
+  els.editImageInput.addEventListener('change', async () => {
+    const [file] = Array.from(els.editImageInput.files || []);
+    if (!file) return;
+    try {
+      await handleEditImageFile(file);
+      clearError();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : String(error));
+    } finally {
+      els.editImageInput.value = '';
+    }
+  });
+  els.clearEditImageBtn.addEventListener('click', () => clearEditImageState());
+
+  els.editImageDropzone.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+    dragDepth += 1;
+    els.editImageDropzone.classList.add('is-dragover');
+  });
+  els.editImageDropzone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    els.editImageDropzone.classList.add('is-dragover');
+  });
+  ['dragleave', 'dragend'].forEach((eventName) => {
+    els.editImageDropzone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) {
+        els.editImageDropzone.classList.remove('is-dragover');
+      }
+    });
+  });
+  els.editImageDropzone.addEventListener('drop', async (event) => {
+    event.preventDefault();
+    dragDepth = 0;
+    els.editImageDropzone.classList.remove('is-dragover');
+    const [file] = Array.from(event.dataTransfer?.files || []);
+    if (!file) return;
+    try {
+      await handleEditImageFile(file);
+      clearError();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : String(error));
+    }
   });
 
   els.sizeModePreset.addEventListener('click', () => {

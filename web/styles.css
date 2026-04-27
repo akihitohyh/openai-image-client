@@ -394,6 +394,97 @@ img {
   background: var(--color-yellow);
 }
 
+.mode-builder {
+  margin-bottom: var(--spacing-lg);
+  display: grid;
+  gap: var(--spacing-md);
+}
+
+.mode-builder-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.edit-image-panel {
+  display: grid;
+  gap: var(--spacing-md);
+}
+
+.edit-image-dropzone {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  background: var(--bg-white);
+  border: var(--border-thick);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-medium);
+  cursor: pointer;
+}
+
+.edit-image-dropzone.is-dragover {
+  background: var(--color-blue);
+}
+
+.edit-image-dropzone-kicker {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.08em;
+}
+
+.edit-image-dropzone-title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.edit-image-dropzone-desc,
+.edit-image-meta {
+  color: var(--text-secondary);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.edit-image-preview {
+  display: grid;
+  gap: var(--spacing-md);
+  padding: 16px;
+  background: var(--bg-white);
+  border: var(--border-thick);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-medium);
+}
+
+.edit-image-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.edit-image-preview-title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.edit-image-preview-frame {
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  background: var(--bg-panel);
+  border: var(--border-medium);
+  border-radius: var(--radius-md);
+}
+
+.edit-image-preview-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: var(--bg-white);
+}
+
 .size-panel {
   display: grid;
   gap: var(--spacing-md);
@@ -807,7 +898,9 @@ img {
   }
 
   .toolbar-row,
-  .lightbox-actions {
+  .lightbox-actions,
+  .edit-image-preview-head,
+  .mode-builder-head {
     align-items: stretch;
   }
 
@@ -1040,7 +1133,8 @@ img {
 
 .history-detail-meta,
 .history-detail-prompt,
-.history-detail-error {
+.history-detail-error,
+.history-detail-reference {
   display: grid;
   gap: var(--spacing-md);
   padding: 10px 14px;
@@ -1067,6 +1161,25 @@ img {
   display: flex;
   flex-wrap: wrap;
   gap: var(--spacing-sm);
+}
+
+.history-detail-reference-preview {
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  appearance: none;
+  cursor: pointer;
+  background: var(--bg-white);
+  border: var(--border-medium);
+  border-radius: var(--radius-md);
+}
+
+.history-detail-reference-image {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  display: block;
+  object-fit: contain;
+  background: var(--bg-white);
 }
 
 :root[data-theme='dark'] .image-placeholder.is-error,

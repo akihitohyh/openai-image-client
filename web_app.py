@@ -17,30 +17,41 @@ from requests import RequestException
 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
+KNOWN_IMAGE_ENDPOINTS = (
+    "/v1/images/generations",
+    "/images/generations",
+    "/v1/images/edits",
+    "/images/edits",
+    "/v1/images/variations",
+    "/images/variations",
+)
 
 
 def normalize_base_url(base_url: str) -> str:
-    value = (base_url or "").strip()
-    if not value:
-        return value
-    if value.endswith("/v1/images/generations"):
-        return value
-    if value.endswith("/images/generations"):
-        return value
-    return value.rstrip("/")
+    return (base_url or "").strip().rstrip("/")
 
 
-def candidate_endpoints(base_url: str) -> list[str]:
+def join_url(base_url: str, suffix: str) -> str:
+    return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
+
+
+def candidate_endpoints(base_url: str, route: str) -> list[str]:
     value = normalize_base_url(base_url)
     if not value:
         return []
-    if value.endswith("/images/generations"):
-        return [value]
+
+    for endpoint in KNOWN_IMAGE_ENDPOINTS:
+        if value.endswith(endpoint):
+            prefix = value[: -len(endpoint)]
+            if endpoint.startswith("/v1/"):
+                return [join_url(prefix, f"v1/{route}")]
+            return [join_url(prefix, route)]
+
     if value.endswith("/v1"):
-        return [value + "/images/generations"]
+        return [join_url(value, route)]
     return [
-        value + "/v1/images/generations",
-        value + "/images/generations",
+        join_url(value, f"v1/{route}"),
+        join_url(value, route),
     ]
 
 
@@ -125,85 +136,7 @@ def data_url_from_remote(image_url: str, timeout: int) -> str:
     return data_url_from_bytes(response.content, content_type)
 
 
-def generate_images(payload: dict) -> dict:
-    base_url = str(payload.get("base_url", "")).strip()
-    api_key = str(payload.get("api_key", "")).strip()
-    prompt = str(payload.get("prompt", "")).strip()
-    model = str(payload.get("model", "gpt-image-1")).strip() or "gpt-image-1"
-    size = str(payload.get("size", "1024x1024")).strip() or "1024x1024"
-    timeout = int(payload.get("timeout") or 120)
-    image_count = int(payload.get("n") or 1)
-
-    endpoints = candidate_endpoints(base_url)
-    if not endpoints:
-        raise ValueError("Base URL 不能为空")
-    if not api_key:
-        raise ValueError("API Key 不能为空")
-    if not prompt:
-        raise ValueError("提示词不能为空")
-    if image_count < 1:
-        raise ValueError("n 必须大于等于 1")
-
-    request_body = {
-        "model": model,
-        "prompt": prompt,
-        "size": size,
-        "n": image_count,
-    }
-
-    last_response: requests.Response | None = None
-    last_endpoint = ""
-    diagnostics: list[str] = []
-    response: requests.Response | None = None
-    client_request_id = str(uuid.uuid4())
-
-    started_at = time.time()
-    for endpoint in endpoints:
-        try:
-            current = requests.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "X-Client-Request-Id": client_request_id,
-                },
-                json=request_body,
-                timeout=timeout,
-            )
-        except RequestException as exc:
-            diagnostics.append(exception_diagnostic(endpoint, exc))
-            last_endpoint = endpoint
-            continue
-
-        content_type = current.headers.get("Content-Type", "")
-        if current.ok and "text/html" not in content_type.lower():
-            response = current
-            last_endpoint = endpoint
-            break
-
-        diagnostics.append(response_diagnostic(endpoint, current))
-        last_response = current
-        last_endpoint = endpoint
-        if likely_gateway_or_upstream_error(current):
-            break
-
-    if response is None:
-        error_message = "请求失败，未找到可用的 OpenAI 图片生成接口。"
-        if last_response is not None:
-            error_message = preview_response_body(last_response) or error_message
-        raise RuntimeError(
-            json.dumps(
-                {
-                    "message": error_message,
-                    "last_endpoint": last_endpoint,
-                    "client_request_id": client_request_id,
-                    "diagnostics": diagnostics,
-                },
-                ensure_ascii=False,
-            )
-        )
-
-    data = response.json()
+def parse_image_api_response(data: dict, timeout: int, client_request_id: str, last_endpoint: str) -> list[str]:
     items = data.get("data")
     if not isinstance(items, list) or not items:
         raise RuntimeError(
@@ -240,7 +173,85 @@ def generate_images(payload: dict) -> dict:
                 ensure_ascii=False,
             )
         )
+    return images
 
+
+def request_image_api(
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    route: str,
+    *,
+    json_body: dict | None = None,
+    form_data: dict | None = None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+) -> dict:
+    endpoints = candidate_endpoints(base_url, route)
+    if not endpoints:
+        raise ValueError("Base URL 不能为空")
+    if not api_key:
+        raise ValueError("API Key 不能为空")
+
+    last_response: requests.Response | None = None
+    last_endpoint = ""
+    diagnostics: list[str] = []
+    response: requests.Response | None = None
+    client_request_id = str(uuid.uuid4())
+    started_at = time.time()
+
+    for endpoint in endpoints:
+        try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "X-Client-Request-Id": client_request_id,
+            }
+            request_kwargs = {
+                "headers": headers,
+                "timeout": timeout,
+            }
+            if json_body is not None:
+                headers["Content-Type"] = "application/json"
+                request_kwargs["json"] = json_body
+            else:
+                request_kwargs["data"] = form_data or {}
+                request_kwargs["files"] = files or []
+
+            current = requests.post(endpoint, **request_kwargs)
+        except RequestException as exc:
+            diagnostics.append(exception_diagnostic(endpoint, exc))
+            last_endpoint = endpoint
+            continue
+
+        content_type = current.headers.get("Content-Type", "")
+        if current.ok and "text/html" not in content_type.lower():
+            response = current
+            last_endpoint = endpoint
+            break
+
+        diagnostics.append(response_diagnostic(endpoint, current))
+        last_response = current
+        last_endpoint = endpoint
+        if likely_gateway_or_upstream_error(current):
+            break
+
+    if response is None:
+        error_message = "请求失败，未找到可用的 OpenAI 图片接口。"
+        if last_response is not None:
+            error_message = preview_response_body(last_response) or error_message
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "message": error_message,
+                    "last_endpoint": last_endpoint,
+                    "client_request_id": client_request_id,
+                    "diagnostics": diagnostics,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    data = response.json()
+    images = parse_image_api_response(data, timeout, client_request_id, last_endpoint)
     duration_ms = int((time.time() - started_at) * 1000)
     return {
         "ok": True,
@@ -250,6 +261,108 @@ def generate_images(payload: dict) -> dict:
         "images": images,
         "raw": data,
     }
+
+
+def generate_images(payload: dict) -> dict:
+    base_url = str(payload.get("base_url", "")).strip()
+    api_key = str(payload.get("api_key", "")).strip()
+    prompt = str(payload.get("prompt", "")).strip()
+    model = str(payload.get("model", "gpt-image-1")).strip() or "gpt-image-1"
+    size = str(payload.get("size", "1024x1024")).strip() or "1024x1024"
+    timeout = int(payload.get("timeout") or 120)
+    image_count = int(payload.get("n") or 1)
+
+    if not prompt:
+        raise ValueError("提示词不能为空")
+    if image_count < 1:
+        raise ValueError("n 必须大于等于 1")
+
+    request_body = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "n": image_count,
+    }
+    return request_image_api(
+        base_url,
+        api_key,
+        timeout,
+        "images/generations",
+        json_body=request_body,
+    )
+
+
+def decode_data_url_image(data_url: str, fallback_content_type: str = "image/png") -> tuple[bytes, str]:
+    value = (data_url or "").strip()
+    if not value:
+        raise ValueError("参考图不能为空")
+
+    content_type = fallback_content_type or "image/png"
+    encoded = value
+    if value.startswith("data:"):
+        header, _, encoded = value.partition(",")
+        if not encoded:
+            raise ValueError("参考图数据格式不正确")
+        if ";base64" not in header:
+            raise ValueError("参考图必须是 base64 data URL")
+        detected = header[5:].split(";", 1)[0].strip()
+        if detected:
+            content_type = detected
+
+    try:
+        return base64.b64decode(encoded), content_type
+    except Exception as exc:  # pragma: no cover
+        raise ValueError(f"参考图解码失败: {exc}") from exc
+
+
+def edit_images(payload: dict) -> dict:
+    base_url = str(payload.get("base_url", "")).strip()
+    api_key = str(payload.get("api_key", "")).strip()
+    prompt = str(payload.get("prompt", "")).strip()
+    model = str(payload.get("model", "gpt-image-1")).strip() or "gpt-image-1"
+    size = str(payload.get("size", "1024x1024")).strip() or "1024x1024"
+    timeout = int(payload.get("timeout") or 120)
+    image_count = int(payload.get("n") or 1)
+    edit_image = payload.get("edit_image")
+
+    if not prompt:
+        raise ValueError("图生图模式下提示词不能为空")
+    if image_count < 1:
+        raise ValueError("n 必须大于等于 1")
+    if not isinstance(edit_image, dict):
+        raise ValueError("图生图模式下请先上传参考图")
+
+    image_name = str(edit_image.get("name", "")).strip() or "reference-image.png"
+    content_type = str(edit_image.get("content_type", "")).strip() or "image/png"
+    image_data_url = str(edit_image.get("data_url", "")).strip()
+    image_bytes, content_type = decode_data_url_image(image_data_url, content_type)
+
+    request_data = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "n": str(image_count),
+    }
+    files = [
+        ("image", (image_name, image_bytes, content_type)),
+    ]
+    return request_image_api(
+        base_url,
+        api_key,
+        timeout,
+        "images/edits",
+        form_data=request_data,
+        files=files,
+    )
+
+
+def process_request_payload(payload: dict) -> dict:
+    mode = str(payload.get("mode", "generate")).strip().lower() or "generate"
+    if mode == "edit":
+        return edit_images(payload)
+    if mode != "generate":
+        raise ValueError("不支持的模式")
+    return generate_images(payload)
 
 
 class AppHandler(SimpleHTTPRequestHandler):
@@ -293,7 +406,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         try:
-            result = generate_images(payload)
+            result = process_request_payload(payload)
         except ValueError as exc:
             self._send_json(400, {"ok": False, "message": str(exc)})
             return
