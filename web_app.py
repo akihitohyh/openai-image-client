@@ -372,6 +372,18 @@ class AppHandler(SimpleHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("[web] " + (fmt % args) + "\n")
 
+    def end_headers(self) -> None:
+        request_path = urlparse(self.path).path
+        if (
+            request_path.startswith("/api/")
+            or request_path in {"/", "/index.html"}
+            or request_path.endswith((".html", ".css", ".js"))
+        ):
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        super().end_headers()
+
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -381,10 +393,11 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path.startswith("/api/health"):
+        request_path = urlparse(self.path).path
+        if request_path.startswith("/api/health"):
             self._send_json(200, {"ok": True, "service": "openai-image-client-web"})
             return
-        if self.path in {"/", ""}:
+        if request_path in {"/", ""}:
             self.path = "/index.html"
         return super().do_GET()
 
