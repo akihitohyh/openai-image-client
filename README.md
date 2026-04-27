@@ -1,5 +1,7 @@
 # OpenAI Compatible Image Client
 
+[English README](README_EN.md)
+
 一个简洁的 OpenAI 风格生图客户端，包含两种使用方式：
 
 1. Python CLI 脚本
@@ -34,6 +36,7 @@
 ├── config.json.example    # 示例配置
 └── requirements.txt
 ```
+
 ---
 
 ## 1. CLI 脚本
