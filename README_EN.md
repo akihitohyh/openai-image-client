@@ -118,3 +118,9 @@ http://127.0.0.1:8000
 - If the upstream returns `b64_json`, the page displays it directly
 - If the upstream returns `url`, the backend downloads the image first and then returns it to the frontend
 - The backend does not store frontend input settings for you
+
+---
+
+## Acknowledgements
+
+- 🔗 [Linux DO](https://linux.do)
