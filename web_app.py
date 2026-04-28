@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import mimetypes
+import threading
 import sys
 import time
 import uuid
@@ -25,6 +26,9 @@ KNOWN_IMAGE_ENDPOINTS = (
     "/v1/images/variations",
     "/images/variations",
 )
+JOB_TTL_SECONDS = 60 * 60
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -365,6 +369,106 @@ def process_request_payload(payload: dict) -> dict:
     return generate_images(payload)
 
 
+def validate_request_payload(payload: dict) -> None:
+    mode = str(payload.get("mode", "generate")).strip().lower() or "generate"
+    base_url = str(payload.get("base_url", "")).strip()
+    api_key = str(payload.get("api_key", "")).strip()
+    prompt = str(payload.get("prompt", "")).strip()
+    if not base_url:
+        raise ValueError("Base URL 不能为空")
+    if not api_key:
+        raise ValueError("API Key 不能为空")
+    if not prompt:
+        raise ValueError("提示词不能为空" if mode == "generate" else "图生图模式下提示词不能为空")
+    try:
+        image_count = int(payload.get("n") or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("n 必须大于等于 1") from exc
+    if image_count < 1:
+        raise ValueError("n 必须大于等于 1")
+    if mode == "edit" and not isinstance(payload.get("edit_image"), dict):
+        raise ValueError("图生图模式下请先上传参考图")
+    if mode not in {"generate", "edit"}:
+        raise ValueError("不支持的模式")
+
+
+def cleanup_jobs(now: float | None = None) -> None:
+    current = now or time.time()
+    with JOBS_LOCK:
+        expired_ids = [
+            job_id
+            for job_id, job in JOBS.items()
+            if current - float(job.get("updated_at") or job.get("created_at") or current) > JOB_TTL_SECONDS
+        ]
+        for job_id in expired_ids:
+            JOBS.pop(job_id, None)
+
+
+def create_async_job(payload: dict) -> str:
+    cleanup_jobs()
+    job_id = str(uuid.uuid4())
+    now = time.time()
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def worker() -> None:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return
+            job["status"] = "running"
+            job["updated_at"] = time.time()
+
+        try:
+            result = process_request_payload(payload)
+        except ValueError as exc:
+            error_payload = {"message": str(exc)}
+            status = "error"
+        except RuntimeError as exc:
+            try:
+                error_payload = json.loads(str(exc))
+            except json.JSONDecodeError:
+                error_payload = {"message": str(exc)}
+            status = "error"
+        except Exception as exc:  # pragma: no cover
+            error_payload = {"message": f"服务内部错误: {type(exc).__name__}: {exc}"}
+            status = "error"
+        else:
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                if job is None:
+                    return
+                job["status"] = "success"
+                job["updated_at"] = time.time()
+                job["result"] = result
+            return
+
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return
+            job["status"] = status
+            job["updated_at"] = time.time()
+            job["error"] = error_payload
+
+    threading.Thread(target=worker, daemon=True).start()
+    return job_id
+
+
+def get_async_job(job_id: str) -> dict | None:
+    cleanup_jobs()
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return None
+        return dict(job)
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -397,12 +501,31 @@ class AppHandler(SimpleHTTPRequestHandler):
         if request_path.startswith("/api/health"):
             self._send_json(200, {"ok": True, "service": "openai-image-client-web"})
             return
+        if request_path.startswith("/api/jobs/"):
+            job_id = request_path.rsplit("/", 1)[-1].strip()
+            job = get_async_job(job_id)
+            if not job:
+                self._send_json(404, {"ok": False, "message": "任务不存在或已过期"})
+                return
+            payload = {
+                "ok": True,
+                "job_id": job["id"],
+                "status": job["status"],
+                "created_at": job["created_at"],
+                "updated_at": job["updated_at"],
+            }
+            if job["status"] == "success":
+                payload["result"] = job.get("result", {})
+            elif job["status"] == "error":
+                payload["error"] = job.get("error", {"message": "任务执行失败"})
+            self._send_json(200, payload)
+            return
         if request_path in {"/", ""}:
             self.path = "/index.html"
         return super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path != "/api/generate":
+        if self.path not in {"/api/generate", "/api/generate-async"}:
             self._send_json(404, {"ok": False, "message": "Not Found"})
             return
 
@@ -416,6 +539,16 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = json.loads(raw_body.decode("utf-8"))
         except json.JSONDecodeError:
             self._send_json(400, {"ok": False, "message": "请求体不是合法 JSON"})
+            return
+
+        if self.path == "/api/generate-async":
+            try:
+                validate_request_payload(payload)
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "message": str(exc)})
+                return
+            job_id = create_async_job(payload)
+            self._send_json(200, {"ok": True, "job_id": job_id, "status": "queued"})
             return
 
         try:

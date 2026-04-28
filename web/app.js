@@ -154,6 +154,12 @@ function formatClock(ms) {
   return `${minutes}:${seconds}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function formatDateTime(timestamp) {
   return new Date(timestamp).toLocaleString('zh-CN', {
     hour12: false,
@@ -889,10 +895,11 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
       };
     }
 
-    const response = await fetch('/api/generate', {
+    const response = await fetch('/api/generate-async', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestPayload),
+      cache: 'no-store',
     });
 
     const data = await response.json().catch(() => ({}));
@@ -900,15 +907,40 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
       throw new Error(formatError(data));
     }
 
+    const jobId = String(data.job_id || '').trim();
+    if (!jobId) {
+      throw new Error('服务未返回任务 ID');
+    }
+    entry.jobId = jobId;
+
+    let finalData = null;
+    while (true) {
+      await sleep(2000);
+      const pollResponse = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+        cache: 'no-store',
+      });
+      const pollData = await pollResponse.json().catch(() => ({}));
+      if (!pollResponse.ok || !pollData.ok) {
+        throw new Error(formatError(pollData));
+      }
+      if (pollData.status === 'success') {
+        finalData = pollData.result || {};
+        break;
+      }
+      if (pollData.status === 'error') {
+        throw new Error(formatError(pollData.error || pollData));
+      }
+    }
+
     entry.elapsedMs = Date.now() - entry.startedAt;
     stopRequestTimer();
     entry.status = 'success';
-    entry.images = Array.isArray(data.images) ? data.images : [];
-    entry.durationMs = typeof data.duration_ms === 'number' ? data.duration_ms : entry.elapsedMs;
-    entry.endpoint = data.endpoint || '';
-    entry.clientRequestId = data.client_request_id || '';
+    entry.images = Array.isArray(finalData.images) ? finalData.images : [];
+    entry.durationMs = typeof finalData.duration_ms === 'number' ? finalData.duration_ms : entry.elapsedMs;
+    entry.endpoint = finalData.endpoint || '';
+    entry.clientRequestId = finalData.client_request_id || '';
     renderHistory();
-    return { ok: true, entry, data };
+    return { ok: true, entry, data: finalData };
   } catch (error) {
     entry.elapsedMs = Date.now() - entry.startedAt;
     stopRequestTimer();
