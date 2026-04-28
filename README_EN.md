@@ -102,6 +102,7 @@ python generate_image.py \
 - Click an image to show details and prompt on the right
 - Built-in image preview
 - Multi-image requests are split into sequential single tasks
+- Long-running generation requests now use async job polling to reduce browser-side `Failed to fetch` issues
 - All frontend settings are automatically stored in the current browser
 
 ### Start
@@ -125,6 +126,7 @@ http://127.0.0.1:8000
 - It can also be a full endpoint, for example `https://your-api-host.com/v1/images/generations`
 - Image-to-image mode automatically switches to a compatible `images/edits` endpoint
 - Reference images are kept only in browser memory and are not backed up by the backend
+- Long-running tasks are created as jobs first and then polled by the frontend
 - If the upstream returns `b64_json`, the page displays it directly
 - If the upstream returns `url`, the backend downloads the image first and then returns it to the frontend
 - The backend does not store frontend input settings for you
@@ -139,6 +141,7 @@ http://127.0.0.1:8000
 - Added mode, reference image, and prompt details in result history
 - Added OpenAI-compatible `images/edits` backend support
 - Kept multi-image requests running as sequential tasks with independent wait time and timeout tracking
+- Switched long-running text-to-image / image-to-image requests to async polling to reduce `Failed to fetch` caused by broken long-lived connections
 
 ---
 
