@@ -6,6 +6,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.bak-*
+*.log
+*.egg-info/
+build/
+dist/
 
 # Virtual environments
 .venv/
@@ -13,7 +18,14 @@ venv/
 
 # Local runtime data
 outputs/
+.run/
 
 # Local private config
 config.json
-config.local.json
+config.local.json*
+.env
+.env.*
+!.env.example
+
+# Local scratch files
+11.toml

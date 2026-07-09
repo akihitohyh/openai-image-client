@@ -21,7 +21,9 @@ It works well with OpenAI Images API-compatible gateways, proxies, or self-hoste
 
 ## Features
 
-- Compatible with `POST /v1/images/generations` and `POST /v1/images/edits`
+- Compatible with `POST /v1/images/generations`, `POST /v1/images/edits`, and xAI `POST /v1/videos/generations`
+- Supports the OpenAI `gpt-image-2` image protocol, Grok Imagine `grok-imagine-image`, and `grok-imagine-video`
+- `protocol=auto` selects by model name or xAI Base URL; `openai` / `grok` can be forced
 - Supports both text-to-image and image-to-image modes
 - Image-to-image supports reference upload, drag-and-drop, preview, and removal
 - Accepts either an API root URL or a full image endpoint
@@ -29,6 +31,7 @@ It works well with OpenAI Images API-compatible gateways, proxies, or self-hoste
 - Web settings are stored only in browser `localStorage`
 - The backend does not save frontend settings or create backups
 - Supports upstream responses with either `b64_json` or `url`
+- `grok-imagine-video` automatically creates a video job, polls the returned `request_id`, and returns the final video URL
 
 ---
 
@@ -86,7 +89,60 @@ You can also provide everything via command-line arguments:
 python generate_image.py \
   --base-url "https://your-api-host.com" \
   --api-key "your_api_key" \
+  --protocol openai \
   --prompt "A cute orange cat astronaut"
+```
+
+Grok Imagine text-to-image:
+
+```bash
+python generate_image.py \
+  --base-url "https://api.x.ai/v1" \
+  --api-key "your_xai_api_key" \
+  --protocol grok \
+  --model "grok-imagine-image" \
+  --prompt "A cinematic futuristic city at sunset" \
+  --aspect-ratio "16:9" \
+  --resolution "2k"
+```
+
+Image-to-image with a reference image:
+
+```bash
+python generate_image.py \
+  --mode edit \
+  --protocol grok \
+  --model "grok-imagine-image" \
+  --prompt "Keep the subject composition and change it to a cyberpunk night scene" \
+  --image "./reference.png"
+```
+
+Grok Imagine text-to-video:
+
+```bash
+python generate_image.py \
+  --base-url "https://api.x.ai/v1" \
+  --api-key "your_xai_api_key" \
+  --protocol grok \
+  --mode video \
+  --model "grok-imagine-video" \
+  --prompt "A cinematic drone shot over a futuristic city at sunset" \
+  --aspect-ratio "16:9" \
+  --resolution "720p" \
+  --duration 10 \
+  --timeout 600
+```
+
+Grok Imagine image-to-video:
+
+```bash
+python generate_image.py \
+  --mode edit \
+  --protocol grok \
+  --model "grok-imagine-video-1.5" \
+  --prompt "Animate the subject with subtle camera movement and natural motion" \
+  --image "./reference.png" \
+  --timeout 600
 ```
 
 ---
@@ -124,7 +180,9 @@ http://127.0.0.1:8000
 
 - `Base URL` can be an API root, for example `https://your-api-host.com`
 - It can also be a full endpoint, for example `https://your-api-host.com/v1/images/generations`
-- Image-to-image mode automatically switches to a compatible `images/edits` endpoint
+- `Protocol` defaults to auto detection; `grok-imagine-image...`, `grok-imagine-video...`, or xAI Base URLs use the Grok JSON protocol
+- Image-to-image mode automatically switches to a compatible `images/edits` endpoint; OpenAI/GPT uses multipart while Grok uses JSON
+- When the model is `grok-imagine-video`, the backend calls `videos/generations` and the Web UI renders a video player
 - Reference images are kept only in browser memory and are not backed up by the backend
 - Long-running tasks are created as jobs first and then polled by the frontend
 - If the upstream returns `b64_json`, the page displays it directly

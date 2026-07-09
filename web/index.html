@@ -1,284 +1,913 @@
-<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenAI Image Client Web</title>
-    <link rel="stylesheet" href="/styles.css?v=20260428-2" />
-  </head>
-  <body>
-    <div class="page-shell">
-      <header class="card hero-panel">
-        <div class="hero-main">
-          <p class="hero-kicker">LOCAL TOOL / NEO-BRUTALISM UI</p>
-          <h1 class="hero-title">OpenAI Image Client</h1>
-          <p class="hero-desc">
-            本地网页版图片生成工具。所有设置只保存在当前浏览器；后端只做代理请求，不做备份、不存配置。
-          </p>
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full bg-slate-50">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图像/视频生成控制台 | 生产环境</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .lightbox-backdrop {
+            background: rgba(15, 23, 42, 0.78);
+            backdrop-filter: blur(6px);
+        }
+    </style>
+</head>
+<body class="h-full text-slate-900 antialiased flex flex-col">
+
+    <header class="bg-white border-b border-slate-200 shrink-0">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+                <span class="font-semibold text-sm tracking-wide uppercase text-slate-700">Image / Video Client Web API</span>
+                <span class="text-xs px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md border border-slate-200">v1.1 生产版</span>
+            </div>
+            <div id="service-status" class="text-xs text-slate-400">正在连接后端...</div>
         </div>
-        <div class="hero-side">
-          <div class="hero-note note-yellow">前端本地保存</div>
-          <div class="hero-note note-blue">后端仅转发请求</div>
-          <div class="hero-note note-white theme-note">
-            <span>DARK 模式</span>
-            <button id="themeToggle" class="toggle" type="button" aria-label="切换深色模式" aria-pressed="false">
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-          <div id="saveState" class="hero-note note-white">设置尚未修改</div>
+    </header>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6 overflow-hidden">
+
+        <section class="w-full md:w-[400px] shrink-0 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-y-auto no-scrollbar">
+            <div class="p-4 border-b border-slate-100 bg-slate-50/50">
+                <h2 class="text-sm font-medium text-slate-800">接口与参数配置</h2>
+                <p id="protocol-desc" class="text-xs text-slate-500 mt-0.5">OpenAI 生图使用 Images API，适合 gpt-image-2。</p>
+            </div>
+
+            <form id="config-form" class="p-4 space-y-4 flex-1">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">Base URL</label>
+                    <input type="url" id="base_url" required placeholder="https://api.openai.com/v1"
+                        class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">API Key</label>
+                    <input type="password" id="api_key" required placeholder="sk-..."
+                        class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1.5">协议 (Protocol)</label>
+                    <input type="hidden" id="protocol" value="openai-image">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 bg-slate-100 p-1 rounded-lg">
+                        <button type="button" id="protocol-openai-image" onclick="switchProtocol('openai-image')" class="text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition">OpenAI 生图</button>
+                        <button type="button" id="protocol-grok-image" onclick="switchProtocol('grok-image')" class="text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition">Grok 生图</button>
+                        <button type="button" id="protocol-grok-video" onclick="switchProtocol('grok-video')" class="text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition">Grok 视频</button>
+                    </div>
+                </div>
+
+                <hr class="border-slate-100">
+
+                <div>
+                    <label id="mode-label" class="block text-xs font-semibold text-slate-600 mb-1.5">作业模式</label>
+                    <div class="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-lg">
+                        <button type="button" id="mode-generate" onclick="switchMode('generate')" class="text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition">文生图 (Generate)</button>
+                        <button type="button" id="mode-edit" onclick="switchMode('edit')" class="text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition">图生图 (Edit)</button>
+                    </div>
+                </div>
+
+                <div id="edit-image-container" class="hidden animate-fadeIn">
+                    <label id="reference-label" class="block text-xs font-semibold text-slate-600 mb-1">参考图 (OpenAI 最多 16 张)</label>
+                    <div id="reference-dropzone" class="border-2 border-dashed border-slate-200 rounded-lg p-4 text-center hover:bg-slate-50 transition cursor-pointer relative" onclick="document.getElementById('file-input').click()">
+                        <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" multiple class="hidden" onchange="handleFileSelect(event)">
+                        <p id="upload-placeholder" class="text-xs text-slate-500">点击选择或追加参考图像</p>
+                        <div id="upload-preview-grid" class="hidden mt-3 grid grid-cols-3 gap-2"></div>
+                    </div>
+                    <div class="mt-2 flex items-center justify-between gap-2 text-xs">
+                        <span id="upload-count" class="text-slate-500">尚未选择图片</span>
+                        <button type="button" id="clear-upload-btn" class="hidden text-slate-500 hover:text-rose-600 transition" onclick="clearReferenceImages(event)">清空参考图</button>
+                    </div>
+                </div>
+
+                <div>
+                    <label id="prompt-label" class="block text-xs font-semibold text-slate-600 mb-1">提示词 (Prompt)</label>
+                    <textarea id="prompt" rows="6" required placeholder="例如: A professional minimalist workspace, cinematic lighting..."
+                        class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition resize-none"></textarea>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">模型 (Model)</label>
+                        <select id="model" class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                            <option value="gpt-image-2">gpt-image-2</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label id="size-label" class="block text-xs font-semibold text-slate-600 mb-1">分辨率 (Size)</label>
+                        <select id="size" class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                            <option value="1024x1024">1024x1024</option>
+                            <option value="1024x1536">1024x1536</option>
+                            <option value="1536x1024">1536x1024</option>
+                            <option value="1920x1072">1920x1072</option>
+                            <option value="1072x1920">1072x1920</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="video-options" class="hidden grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">视频分辨率</label>
+                        <select id="video_resolution" class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                            <option value="480p">480p</option>
+                            <option value="720p" selected>720p</option>
+                            <option value="1080p">1080p</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">视频时长 (秒)</label>
+                        <input type="number" id="duration" value="10" min="1" max="15"
+                            class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label id="count-label" class="block text-xs font-semibold text-slate-600 mb-1">生成张数 (n)</label>
+                        <input type="number" id="image_count" value="1" min="1" max="10"
+                            class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                    </div>
+                    <div>
+                        <label id="timeout-label" class="block text-xs font-semibold text-slate-600 mb-1">超时断开 (秒)</label>
+                        <input type="number" id="timeout" value="500" min="5"
+                            class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                    </div>
+                </div>
+
+                <button type="submit" id="submit-btn" class="w-full bg-slate-900 text-white font-medium text-sm py-2.5 rounded-lg shadow hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 transition flex items-center justify-center space-x-2">
+                    <span>发送生成请求</span>
+                </button>
+            </form>
+        </section>
+
+        <section class="flex-1 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden">
+            <div class="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 shrink-0">
+                <div>
+                    <h2 class="text-sm font-medium text-slate-800">控制台输出与监视器</h2>
+                    <p class="text-xs text-slate-500 mt-0.5" id="job-status-desc">等待提交新任务...</p>
+                </div>
+                <div id="loader" class="hidden">
+                    <svg class="animate-spin h-5 w-5 text-slate-600" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="flex-1 p-6 overflow-y-auto space-y-6">
+
+                <div id="diagnostic-panel" class="hidden border border-rose-200 bg-rose-50/40 rounded-lg p-4">
+                    <div class="flex items-center space-x-2 text-rose-800 font-semibold text-xs uppercase tracking-wider mb-2">
+                        <span class="w-2 h-2 rounded-full bg-rose-500"></span>
+                        <span>错误诊断报告</span>
+                    </div>
+                    <p id="error-message" class="text-sm text-rose-700 font-medium"></p>
+                    <div id="diagnostic-details" class="mt-3 text-xs font-mono text-slate-600 bg-white border border-slate-100 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap leading-relaxed"></div>
+                </div>
+
+                <div id="meta-panel" class="hidden border border-slate-200 bg-slate-50/50 rounded-lg p-3 text-xs grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono">
+                    <div><span class="text-slate-400">Request-ID:</span> <span id="meta-req-id" class="text-slate-700"></span></div>
+                    <div><span class="text-slate-400">核心耗时:</span> <span id="meta-duration" class="text-slate-700"></span></div>
+                    <div><span class="text-slate-400">等待时间:</span> <span id="meta-wait" class="text-slate-700">00:00</span></div>
+                    <div><span class="text-slate-400">调用端点:</span> <span id="meta-endpoint" class="text-slate-700 break-all"></span></div>
+                    <div><span class="text-slate-400">任务状态:</span> <span id="meta-status" class="text-slate-700"></span></div>
+                </div>
+
+                <div id="request-hint" class="hidden border border-sky-200 bg-sky-50/70 rounded-lg p-3 text-xs text-sky-800">
+                    正在等待接口返回；已等待 <span id="request-elapsed" class="font-mono font-semibold">00:00</span>，完成后会一次性展示全部媒体。
+                </div>
+
+                <div id="image-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="border border-dashed border-slate-200 rounded-xl aspect-square flex flex-col items-center justify-center text-slate-400 bg-slate-50/30">
+                        <svg class="w-8 h-8 opacity-40 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V6.75zm.375 0a.375 0 11-.75 0 .375 0 017.75 0z" /></svg>
+                        <span class="text-xs">暂无输出图像</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <div id="lightbox" class="hidden fixed inset-0 z-50">
+        <div id="lightbox-backdrop" class="lightbox-backdrop absolute inset-0"></div>
+        <div class="relative z-10 h-full w-full flex items-center justify-center p-4">
+            <div class="max-w-6xl w-full bg-white rounded-2xl shadow-2xl overflow-hidden">
+                <div class="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+                    <div>
+                        <p class="text-xs uppercase tracking-wide text-slate-400">Preview</p>
+                        <p id="lightbox-title" class="text-sm font-semibold text-slate-800">媒体预览</p>
+                    </div>
+                    <button id="lightbox-close" type="button" class="bg-slate-900 text-white text-xs px-3 py-1.5 rounded-md hover:bg-slate-800 transition">关闭</button>
+                </div>
+                <div class="bg-slate-100 flex items-center justify-center max-h-[82vh]">
+                    <img id="lightbox-image" class="max-w-full max-h-[82vh] object-contain" alt="preview image">
+                    <video id="lightbox-video" class="hidden max-w-full max-h-[82vh]" controls playsinline></video>
+                </div>
+            </div>
         </div>
-      </header>
-
-      <section class="stats-grid">
-        <article class="stat-card stat-yellow neo-interactive">
-          <div class="stat-label">运行状态</div>
-          <div id="statusBadge" class="status-badge status-queued">待命</div>
-        </article>
-        <article class="stat-card stat-blue neo-interactive">
-          <div class="stat-label">当前模型</div>
-          <div id="statModel" class="stat-value stat-value-text">gpt-image-2</div>
-        </article>
-        <article class="stat-card stat-green neo-interactive">
-          <div class="stat-label">输出规格</div>
-          <div id="statSize" class="stat-value stat-value-text">1024x1024</div>
-        </article>
-        <article class="stat-card stat-pink neo-interactive">
-          <div class="stat-label">生成数量</div>
-          <div id="statCount" class="stat-value">1</div>
-        </article>
-      </section>
-
-      <div class="app-grid">
-        <aside class="card sidebar-panel">
-          <div class="panel-head">
-            <div>
-              <h2 class="card-title">连接设置</h2>
-              <p class="card-desc">字段与原 Python 脚本保持一致。</p>
-            </div>
-            <button id="resetSettingsBtn" class="btn btn-white neo-interactive btn-sm" type="button">清空本地设置</button>
-          </div>
-
-          <form id="settingsForm" class="settings-form" autocomplete="off">
-            <label class="field-block">
-              <span class="field-label">Base URL</span>
-              <input id="baseUrl" name="baseUrl" class="input-field" placeholder="https://your-api-host.com" />
-              <small class="field-help">支持 API 根地址或完整 `/v1/images/generations` 地址</small>
-            </label>
-
-            <label class="field-block">
-              <span class="field-label">API Key</span>
-              <input id="apiKey" name="apiKey" type="password" class="input-field" placeholder="sk-..." />
-            </label>
-
-            <label class="field-block">
-              <span class="field-label">Model</span>
-              <input id="model" name="model" class="input-field" placeholder="gpt-image-2" />
-            </label>
-
-            <section class="size-builder">
-              <div class="size-builder-head">
-                <span class="field-label">Size</span>
-                <span id="resolvedSizeBadge" class="mini-tag mini-tag-green">1024x1024</span>
-              </div>
-
-              <div class="tab-row">
-                <button id="sizeModePreset" class="tab active" type="button">预设尺寸</button>
-                <button id="sizeModeCustom" class="tab" type="button">自定义宽高</button>
-              </div>
-
-              <div id="presetSizePanel" class="size-panel">
-                <div class="field-row two-col">
-                  <label class="field-block">
-                    <span class="field-label">基准分辨率</span>
-                    <select id="presetBase" class="select-field">
-                      <option value="1K">1K</option>
-                      <option value="2K">2K</option>
-                    </select>
-                  </label>
-                  <label class="field-block">
-                    <span class="field-label">图像比例</span>
-                    <select id="presetRatio" class="select-field">
-                      <option value="1:1">1:1</option>
-                      <option value="3:2">3:2</option>
-                      <option value="2:3">2:3</option>
-                      <option value="16:9">16:9</option>
-                      <option value="9:16">9:16</option>
-                      <option value="4:3">4:3</option>
-                      <option value="3:4">3:4</option>
-                      <option value="21:9">21:9</option>
-                    </select>
-                  </label>
-                </div>
-                <p class="size-help">16:9 与 9:16 仅在 2K 基准下可用；其他比例会自动规整为 16 的倍数。</p>
-              </div>
-
-              <div id="customSizePanel" class="size-panel hidden">
-                <div class="field-row two-col">
-                  <label class="field-block">
-                    <span class="field-label">宽度</span>
-                    <input id="customWidth" class="input-field" type="number" min="16" step="16" inputmode="numeric" placeholder="1024" />
-                  </label>
-                  <label class="field-block">
-                    <span class="field-label">高度</span>
-                    <input id="customHeight" class="input-field" type="number" min="16" step="16" inputmode="numeric" placeholder="1024" />
-                  </label>
-                </div>
-                <p class="size-help">自定义宽高只能填写 16 的倍数。</p>
-              </div>
-            </section>
-
-            <div class="field-row two-col">
-              <label class="field-block">
-                <span class="field-label">数量 n</span>
-                <input id="count" name="count" type="number" min="1" max="8" step="1" class="input-field" />
-                <small class="field-help">如果大于 1，会拆成多个独立串行任务逐张生成。</small>
-              </label>
-              <label class="field-block">
-                <span class="field-label">超时（秒）</span>
-                <input id="timeout" name="timeout" type="number" min="10" max="600" step="1" class="input-field" />
-              </label>
-            </div>
-          </form>
-
-          <div class="info-card">
-            <div class="info-card-title">请求规则</div>
-            <ul class="info-list">
-              <li>前端调用本地 `/api/generate`</li>
-              <li>后端转发到你填写的图片接口</li>
-              <li>页面不会在后端落盘保存设置</li>
-            </ul>
-          </div>
-        </aside>
-
-        <main class="main-column">
-          <section class="card composer-panel">
-            <div class="panel-head panel-head-stack">
-              <div>
-                <h2 class="card-title">提示词</h2>
-                <p id="promptDesc" class="card-desc">输入提示词后直接生成图片，错误信息会在当前页面显示。</p>
-              </div>
-              <div class="token-row">
-                <span id="summaryBaseUrl" class="mini-tag mini-tag-blue">Base URL 未填写</span>
-                <span id="summarySize" class="mini-tag mini-tag-green">尺寸 1024x1024</span>
-                <span id="summaryTimeout" class="mini-tag mini-tag-yellow">超时 120 秒</span>
-                <span id="summaryTheme" class="mini-tag mini-tag-white">LIGHT 模式</span>
-              </div>
-            </div>
-
-            <section class="mode-builder">
-              <div class="mode-builder-head">
-                <span class="field-label">工作模式</span>
-                <span id="modeBadge" class="mini-tag mini-tag-blue">文生图</span>
-              </div>
-              <div class="tab-row">
-                <button id="imageModeGenerate" class="tab active" type="button">文生图</button>
-                <button id="imageModeEdit" class="tab" type="button">图生图</button>
-              </div>
-
-              <div id="editImagePanel" class="edit-image-panel hidden">
-                <input id="editImageInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" />
-                <div id="editImageDropzone" class="edit-image-dropzone neo-interactive" role="button" tabindex="0" aria-label="上传参考图">
-                  <div class="edit-image-dropzone-kicker">IMAGE TO IMAGE</div>
-                  <div class="edit-image-dropzone-title">点击上传参考图，或把图片拖到这里</div>
-                  <div class="edit-image-dropzone-desc">支持 PNG / JPG / WEBP，前端仅保存在当前浏览器内存中，不会在后端备份。</div>
-                </div>
-
-                <div id="editImagePreviewCard" class="edit-image-preview hidden">
-                  <div class="edit-image-preview-head">
-                    <div class="edit-image-preview-title">参考图预览</div>
-                    <button id="clearEditImageBtn" class="btn btn-white neo-interactive btn-sm" type="button">移除图片</button>
-                  </div>
-                  <div class="edit-image-preview-frame">
-                    <img id="editImagePreview" class="edit-image-preview-img" alt="reference image preview" />
-                  </div>
-                  <div id="editImageMeta" class="edit-image-meta">尚未选择图片</div>
-                </div>
-              </div>
-            </section>
-
-            <textarea id="prompt" class="textarea-field" placeholder="请输入生图提示词..."></textarea>
-
-            <div class="toolbar-row">
-              <button id="generateBtn" class="btn btn-yellow neo-interactive" type="button">生成图片</button>
-              <button id="fillExampleBtn" class="btn btn-blue neo-interactive btn-sm" type="button">填入示例</button>
-              <button id="clearPromptBtn" class="btn btn-white neo-interactive btn-sm" type="button">清空提示词</button>
-            </div>
-          </section>
-
-          <section class="card result-panel">
-            <div class="panel-head panel-head-stack">
-              <div>
-                <h2 class="card-title">结果</h2>
-                <p class="card-desc">新图会直接接在旧图右侧；点击左侧图片后，右侧显示详细信息与提示词。</p>
-              </div>
-              <div class="result-head-tools">
-                <button id="clearHistoryBtn" class="btn btn-white neo-interactive btn-sm" type="button">清空历史</button>
-                <div id="metaInfo" class="meta-info">尚未发起请求</div>
-              </div>
-            </div>
-
-            <div id="errorBox" class="error-box hidden"></div>
-
-            <div id="gallery" class="gallery empty">
-              <div class="empty-state">
-                <div class="empty-state-badge">READY</div>
-                <div class="empty-title">还没有生成结果</div>
-                <div class="empty-desc">填写连接设置与提示词后，点击“生成图片”。</div>
-              </div>
-            </div>
-          </section>
-        </main>
-      </div>
     </div>
 
-    <template id="imageCardTemplate">
-      <button class="image-card neo-interactive" type="button">
-        <div class="image-card-top">
-          <span class="image-index">#1</span>
-          <span class="image-chip image-chip-success">已完成</span>
-        </div>
-        <div class="image-frame">
-          <img alt="generated image" />
-          <div class="image-placeholder hidden"></div>
-        </div>
-      </button>
-    </template>
+    <script>
+        let currentMode = 'generate';
+        const OPENAI_MAX_REFERENCE_IMAGES = 16;
+        const GROK_MAX_REFERENCE_IMAGES = 3;
+        const GROK_MAX_VIDEO_REFERENCE_IMAGES = 7;
+        const MAX_REFERENCE_IMAGE_BYTES = 50 * 1024 * 1024;
+        const ALLOWED_REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+        const DEFAULT_MODELS = new Set([
+            'gpt-image-2',
+            'grok-imagine',
+            'grok-imagine-edit',
+            'grok-imagine-image',
+            'grok-imagine-image-quality',
+            'grok-imagine-video',
+            'grok-imagine-video-1.5'
+        ]);
+        const PROTOCOL_CONFIG = {
+            'openai-image': {
+                backendProtocol: 'openai',
+                defaultModel: 'gpt-image-2',
+                models: ['gpt-image-2'],
+                description: 'OpenAI 生图使用 Images API，适合 gpt-image-2。',
+                promptPlaceholder: '例如: A professional minimalist workspace, cinematic lighting...',
+                promptLabel: '提示词 (Prompt)',
+                generateLabel: '文生图 (Generate)',
+                editLabel: '图生图 (Edit)',
+                modeLabel: '作业模式',
+                referenceLabel: '参考图 (OpenAI 最多 16 张)',
+                uploadPlaceholder: '点击选择或追加参考图像',
+                sizeLabel: '分辨率 (Size)',
+                countLabel: '生成张数 (n)',
+                timeoutLabel: '超时断开 (秒)',
+                submitText: '发送生图请求',
+                waitingText: '正在等待图片接口返回；已等待',
+                pendingText: '等待图像输出',
+                emptyText: '暂无输出图像',
+                resultUnit: '张图像',
+                maxReferenceImages: OPENAI_MAX_REFERENCE_IMAGES,
+                isVideo: false
+            },
+            'grok-image': {
+                backendProtocol: 'grok',
+                defaultModel: 'grok-imagine',
+                models: ['grok-imagine', 'grok-imagine-edit', 'grok-imagine-image', 'grok-imagine-image-quality'],
+                description: 'Grok 生图使用 Grok Imagine 图片协议，支持文生图和图生图。',
+                promptPlaceholder: '例如: A cinematic futuristic city at sunset, neon reflections...',
+                promptLabel: '提示词 (Prompt)',
+                generateLabel: '文生图 (Generate)',
+                editLabel: '图生图 (Edit)',
+                modeLabel: '作业模式',
+                referenceLabel: '参考图 (Grok 生图最多 3 张)',
+                uploadPlaceholder: '点击选择或追加参考图像',
+                sizeLabel: '分辨率 (Size)',
+                countLabel: '生成张数 (n)',
+                timeoutLabel: '超时断开 (秒)',
+                submitText: '发送 Grok 生图请求',
+                waitingText: '正在等待 Grok 图片接口返回；已等待',
+                pendingText: '等待图像输出',
+                emptyText: '暂无输出图像',
+                resultUnit: '张图像',
+                maxReferenceImages: GROK_MAX_REFERENCE_IMAGES,
+                isVideo: false
+            },
+            'grok-video': {
+                backendProtocol: 'grok',
+                defaultModel: 'grok-imagine-video-1.5',
+                models: ['grok-imagine-video-1.5', 'grok-imagine-video'],
+                description: 'Grok 视频会创建异步视频任务并轮询结果，适合文生视频或图生视频。',
+                promptPlaceholder: '例如: A cinematic drone shot over a futuristic city at sunset, smooth camera movement...',
+                promptLabel: '视频提示词 (Prompt)',
+                generateLabel: '文生视频',
+                editLabel: '图生视频',
+                modeLabel: '视频模式',
+                referenceLabel: '参考图 (Grok 视频最多 7 张)',
+                uploadPlaceholder: '点击选择或追加视频参考图像',
+                sizeLabel: '画幅参考 (Aspect)',
+                countLabel: '生成视频数 (n)',
+                timeoutLabel: '任务超时 (秒)',
+                submitText: '发送 Grok 视频请求',
+                waitingText: '正在等待 Grok 视频任务完成；已等待',
+                pendingText: '等待视频输出',
+                emptyText: '暂无输出视频',
+                resultUnit: '个视频',
+                maxReferenceImages: GROK_MAX_VIDEO_REFERENCE_IMAGES,
+                isVideo: true
+            }
+        };
+        let uploadedReferenceImages = [];
+        let currentRequestController = null;
+        let requestStartedAt = 0;
+        let requestTimerId = null;
+        let lightboxActiveTitle = "";
 
-    <template id="historyBoardTemplate">
-      <article class="history-board">
-        <div class="history-board-head">
-          <div class="history-board-title-wrap">
-            <div class="history-board-title">生成历史</div>
-            <div class="history-board-subtitle">左侧按生成顺序排列图片，右侧查看当前选中图片的详细信息</div>
-          </div>
-          <div class="history-board-count mini-tag mini-tag-blue">0 条任务</div>
-        </div>
-        <div class="history-board-body">
-          <div class="history-board-list"></div>
-          <aside class="history-detail">
-            <div class="history-detail-empty">点击左侧图片后，这里会显示详细信息和提示词。</div>
-          </aside>
-        </div>
-      </article>
-    </template>
+        function apiPath(path) {
+            const cleanPath = path.startsWith('/') ? path : `/${path}`;
+            if (window.location.pathname.startsWith('/image.html') || window.location.pathname.startsWith('/image-client/')) {
+                return `/image-client-api${cleanPath.replace(/^\/api/, '')}`;
+            }
+            return cleanPath;
+        }
 
-    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="图片预览">
-      <div id="lightboxBackdrop" class="lightbox-backdrop"></div>
-      <div class="lightbox-shell">
-        <div class="lightbox-topbar">
-          <span id="lightboxCounter" class="mini-tag mini-tag-yellow">1 / 1</span>
-          <div class="lightbox-actions">
-            <button id="lightboxPrev" class="btn btn-white neo-interactive btn-sm" type="button">上一张</button>
-            <button id="lightboxNext" class="btn btn-white neo-interactive btn-sm" type="button">下一张</button>
-            <button id="lightboxClose" class="btn btn-pink neo-interactive btn-sm" type="button">关闭预览</button>
-          </div>
-        </div>
-        <div class="lightbox-panel">
-          <img id="lightboxImage" class="lightbox-image" alt="preview image" />
-        </div>
-      </div>
-    </div>
+        async function checkHealth() {
+            try {
+                const res = await fetch(apiPath('/api/health'));
+                const data = await res.json();
+                if (data.ok) {
+                    document.getElementById('service-status').innerHTML = '<span class="text-emerald-600 font-medium">● 后端服务在线</span>';
+                }
+            } catch (e) {
+                document.getElementById('service-status').innerHTML = '<span class="text-rose-500 font-medium">● 连接失败 (检查后端服务)</span>';
+            }
+        }
+        checkHealth();
 
-    <script src="/app.js?v=20260428-2"></script>
-  </body>
+        function isVideoModel(model) {
+            return String(model || '').trim().toLowerCase().startsWith('grok-imagine-video');
+        }
+
+        function getSelectedProtocol() {
+            const value = document.getElementById('protocol').value;
+            return PROTOCOL_CONFIG[value] ? value : 'openai-image';
+        }
+
+        function getProtocolConfig() {
+            return PROTOCOL_CONFIG[getSelectedProtocol()];
+        }
+
+        function isGrokVideoProtocol() {
+            return getSelectedProtocol() === 'grok-video';
+        }
+
+        function shouldAutoSwitchModel(model) {
+            const value = String(model || '').trim();
+            return !value || DEFAULT_MODELS.has(value);
+        }
+
+        function maxReferenceImagesForCurrentProtocol() {
+            return getProtocolConfig().maxReferenceImages;
+        }
+
+        function modeText(mode) {
+            const config = getProtocolConfig();
+            return mode === 'edit' ? config.editLabel : config.generateLabel;
+        }
+
+        function updateProtocolButtons() {
+            const selected = getSelectedProtocol();
+            ['openai-image', 'grok-image', 'grok-video'].forEach((protocol) => {
+                const button = document.getElementById(`protocol-${protocol}`);
+                if (!button) return;
+                const active = protocol === selected;
+                button.className = active
+                    ? 'text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition'
+                    : 'text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition';
+            });
+        }
+
+        function switchProtocol(protocol) {
+            document.getElementById('protocol').value = PROTOCOL_CONFIG[protocol] ? protocol : 'openai-image';
+            applyProtocolPreset();
+            resetImageGrid();
+        }
+
+        function updateModelOptions(config) {
+            const model = document.getElementById('model');
+            const currentValue = model.value;
+            model.innerHTML = '';
+            config.models.forEach((modelName) => {
+                const option = document.createElement('option');
+                option.value = modelName;
+                option.textContent = modelName;
+                model.appendChild(option);
+            });
+            model.value = config.models.includes(currentValue) ? currentValue : config.defaultModel;
+        }
+
+        function applyProtocolPreset(options = {}) {
+            const config = getProtocolConfig();
+            updateModelOptions(config);
+            if (options.forceModel) {
+                document.getElementById('model').value = config.defaultModel;
+            }
+            updateProtocolButtons();
+
+            document.getElementById('protocol-desc').innerText = config.description;
+            document.getElementById('mode-label').innerText = config.modeLabel;
+            document.getElementById('mode-generate').innerText = config.generateLabel;
+            document.getElementById('mode-edit').innerText = config.editLabel;
+            document.getElementById('reference-label').innerText = config.referenceLabel;
+            document.getElementById('upload-placeholder').innerText = config.uploadPlaceholder;
+            document.getElementById('prompt-label').innerText = config.promptLabel;
+            document.getElementById('prompt').placeholder = config.promptPlaceholder;
+            document.getElementById('size-label').innerText = config.sizeLabel;
+            document.getElementById('count-label').innerText = config.countLabel;
+            document.getElementById('timeout-label').innerText = config.timeoutLabel;
+            document.getElementById('video-options').classList.toggle('hidden', !config.isVideo);
+            document.querySelector('#submit-btn span').innerText = config.submitText;
+
+            const elapsedNode = document.getElementById('request-elapsed');
+            document.getElementById('request-hint').innerHTML = `${config.waitingText} <span id="request-elapsed" class="font-mono font-semibold">${elapsedNode?.innerText || '00:00'}</span>，完成后会一次性展示全部${config.isVideo ? '视频' : '图片'}。`;
+            renderReferenceImages();
+        }
+
+        function switchMode(mode) {
+            currentMode = mode;
+            const genBtn = document.getElementById('mode-generate');
+            const editBtn = document.getElementById('mode-edit');
+            const imgContainer = document.getElementById('edit-image-container');
+
+            if (mode === 'generate') {
+                genBtn.className = "text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition";
+                editBtn.className = "text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition";
+                imgContainer.classList.add('hidden');
+            } else {
+                editBtn.className = "text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition";
+                genBtn.className = "text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition";
+                imgContainer.classList.remove('hidden');
+            }
+            applyProtocolPreset();
+        }
+
+        function formatBytes(bytes) {
+            const value = Number(bytes);
+            if (!Number.isFinite(value) || value <= 0) return '0 B';
+            if (value < 1024) return `${value} B`;
+            if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+            return `${(value / (1024 ** 2)).toFixed(1)} MB`;
+        }
+
+        function readFileAsDataUrl(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ''));
+                reader.onerror = () => reject(new Error('读取参考图失败，请重新选择'));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function handleFileSelect(e) {
+            const files = Array.from(e.target.files || []);
+            try {
+                await addReferenceFiles(files);
+            } catch (error) {
+                alert(error instanceof Error ? error.message : String(error));
+            } finally {
+                e.target.value = '';
+            }
+        }
+
+        async function addReferenceFiles(files) {
+            if (!files.length) return;
+            const accepted = [];
+            for (const file of files) {
+                if (!ALLOWED_REFERENCE_IMAGE_TYPES.has(file.type)) {
+                    alert(`已跳过 ${file.name || '未命名文件'}：仅支持 PNG / JPG / WEBP`);
+                    continue;
+                }
+                if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+                    alert(`已跳过 ${file.name || '未命名文件'}：单张参考图不能超过 50 MB`);
+                    continue;
+                }
+                accepted.push(file);
+            }
+
+            const maxReferenceImages = maxReferenceImagesForCurrentProtocol();
+            const remaining = maxReferenceImages - uploadedReferenceImages.length;
+            if (remaining <= 0) {
+                alert(`当前协议最多只能上传 ${maxReferenceImages} 张参考图`);
+                return;
+            }
+            if (accepted.length > remaining) {
+                alert(`当前协议最多只能上传 ${maxReferenceImages} 张参考图，已保留前 ${remaining} 张`);
+            }
+
+            for (const file of accepted.slice(0, Math.max(0, remaining))) {
+                const dataUrl = await readFileAsDataUrl(file);
+                uploadedReferenceImages.push({
+                    name: file.name || 'reference-image',
+                    content_type: file.type || 'image/png',
+                    size: file.size,
+                    data_url: dataUrl
+                });
+            }
+            renderReferenceImages();
+        }
+
+        function renderReferenceImages() {
+            const placeholder = document.getElementById('upload-placeholder');
+            const grid = document.getElementById('upload-preview-grid');
+            const count = document.getElementById('upload-count');
+            const clearBtn = document.getElementById('clear-upload-btn');
+            const hasImages = uploadedReferenceImages.length > 0;
+            const maxReferenceImages = maxReferenceImagesForCurrentProtocol();
+
+            placeholder.classList.toggle('hidden', hasImages);
+            grid.classList.toggle('hidden', !hasImages);
+            clearBtn.classList.toggle('hidden', !hasImages);
+            count.innerText = hasImages
+                ? `已选择 ${uploadedReferenceImages.length} / ${maxReferenceImages} 张参考图`
+                : '尚未选择图片';
+
+            grid.innerHTML = '';
+            uploadedReferenceImages.forEach((image, index) => {
+                const card = document.createElement('div');
+                card.className = 'relative aspect-square overflow-hidden rounded border border-slate-200 bg-slate-100 shadow-sm';
+                card.title = `${image.name} · ${formatBytes(image.size)}`;
+                card.onclick = (event) => {
+                    event.stopPropagation();
+                    openLightbox(image.data_url, `参考图 #${index + 1}`);
+                };
+
+                const img = document.createElement('img');
+                img.src = image.data_url;
+                img.alt = image.name || `reference image ${index + 1}`;
+                img.className = 'h-full w-full object-cover';
+                card.appendChild(img);
+
+                const badge = document.createElement('div');
+                badge.className = 'absolute left-1 top-1 rounded bg-white/90 px-1.5 py-0.5 text-[10px] text-slate-700 shadow';
+                badge.innerText = `#${index + 1}`;
+                card.appendChild(badge);
+
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'absolute right-1 top-1 rounded bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-white hover:bg-rose-600 transition';
+                removeBtn.innerText = '移除';
+                removeBtn.onclick = (event) => {
+                    event.stopPropagation();
+                    removeReferenceImage(index);
+                };
+                card.appendChild(removeBtn);
+
+                grid.appendChild(card);
+            });
+        }
+
+        function removeReferenceImage(index) {
+            uploadedReferenceImages.splice(index, 1);
+            renderReferenceImages();
+        }
+
+        function clearReferenceImages(event) {
+            if (event) event.stopPropagation();
+            uploadedReferenceImages = [];
+            document.getElementById('file-input').value = '';
+            renderReferenceImages();
+        }
+
+        function openLightbox(imageSrc, title) {
+            const image = document.getElementById('lightbox-image');
+            const video = document.getElementById('lightbox-video');
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+            video.classList.add('hidden');
+            image.classList.remove('hidden');
+            image.src = imageSrc;
+            lightboxActiveTitle = title || '图像预览';
+            document.getElementById('lightbox-title').innerText = lightboxActiveTitle;
+            document.getElementById('lightbox').classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+        }
+
+        function openVideoLightbox(videoSrc, title) {
+            const image = document.getElementById('lightbox-image');
+            const video = document.getElementById('lightbox-video');
+            image.removeAttribute('src');
+            image.classList.add('hidden');
+            video.src = videoSrc;
+            video.classList.remove('hidden');
+            lightboxActiveTitle = title || '视频预览';
+            document.getElementById('lightbox-title').innerText = lightboxActiveTitle;
+            document.getElementById('lightbox').classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+        }
+
+        function closeLightbox() {
+            const video = document.getElementById('lightbox-video');
+            video.pause();
+            document.getElementById('lightbox').classList.add('hidden');
+            document.body.classList.remove('overflow-hidden');
+        }
+
+        document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
+        document.getElementById('lightbox-backdrop').addEventListener('click', closeLightbox);
+
+        document.getElementById('config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (currentRequestController) {
+                currentRequestController.abort();
+                currentRequestController = null;
+            }
+            hidePanels();
+            setLoadingState(true);
+            resetImageGrid();
+            const protocolConfig = getProtocolConfig();
+            updateStatusText(protocolConfig.isVideo ? '正在发送视频生成请求，请等待任务完成...' : '正在发送图片生成请求，请等待接口返回...');
+            document.getElementById('request-hint').classList.remove('hidden');
+            startRequestTimer();
+
+            const payload = {
+                mode: currentMode,
+                base_url: document.getElementById('base_url').value,
+                api_key: document.getElementById('api_key').value,
+                protocol: protocolConfig.backendProtocol,
+                prompt: document.getElementById('prompt').value,
+                model: document.getElementById('model').value,
+                size: document.getElementById('size').value,
+                n: parseInt(document.getElementById('image_count').value, 10) || 1,
+                timeout: parseInt(document.getElementById('timeout').value, 10) || 500
+            };
+            if (protocolConfig.isVideo) {
+                if (!isVideoModel(payload.model)) {
+                    payload.model = protocolConfig.defaultModel;
+                    document.getElementById('model').value = protocolConfig.defaultModel;
+                }
+                const duration = parseInt(document.getElementById('duration').value, 10) || 10;
+                if (duration < 1 || duration > 15) {
+                    alert('视频时长必须在 1 到 15 秒之间');
+                    document.getElementById('request-hint').classList.add('hidden');
+                    stopRequestTimer();
+                    setLoadingState(false);
+                    return;
+                }
+                payload.video_resolution = document.getElementById('video_resolution').value || '720p';
+                payload.duration = duration;
+                payload.poll_interval = 5;
+            }
+
+            if (currentMode === 'edit') {
+                if (!uploadedReferenceImages.length) {
+                    alert('请先上传至少一张参考图后再提交');
+                    document.getElementById('request-hint').classList.add('hidden');
+                    stopRequestTimer();
+                    setLoadingState(false);
+                    return;
+                }
+                const maxReferenceImages = maxReferenceImagesForCurrentProtocol();
+                if (uploadedReferenceImages.length > maxReferenceImages) {
+                    alert(`当前协议最多只能上传 ${maxReferenceImages} 张参考图，请先移除多余图片`);
+                    document.getElementById('request-hint').classList.add('hidden');
+                    stopRequestTimer();
+                    setLoadingState(false);
+                    return;
+                }
+                payload.edit_images = uploadedReferenceImages.map((image) => ({
+                    name: image.name,
+                    content_type: image.content_type,
+                    data_url: image.data_url
+                }));
+            }
+
+            try {
+                currentRequestController = new AbortController();
+                const response = await fetch(apiPath('/api/generate'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: currentRequestController.signal
+                });
+
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data.ok) {
+                    showError("生成请求失败", formatApiError(data) || "请求失败");
+                    document.getElementById('request-hint').classList.add('hidden');
+                    stopRequestTimer();
+                    setLoadingState(false);
+                    return;
+                }
+                renderGenerateResult(data);
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    updateStatusText('请求已取消。');
+                } else {
+                    showError("网络传输异常", err.message);
+                }
+                document.getElementById('request-hint').classList.add('hidden');
+                stopRequestTimer();
+                setLoadingState(false);
+            } finally {
+                currentRequestController = null;
+            }
+        });
+
+        function formatElapsed(ms) {
+            const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+            const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+            const seconds = String(totalSeconds % 60).padStart(2, '0');
+            return `${minutes}:${seconds}`;
+        }
+
+        function updateWaitTime() {
+            const elapsed = requestStartedAt ? Date.now() - requestStartedAt : 0;
+            const text = formatElapsed(elapsed);
+            document.getElementById('request-elapsed').innerText = text;
+            document.getElementById('meta-wait').innerText = text;
+        }
+
+        function startRequestTimer() {
+            stopRequestTimer();
+            requestStartedAt = Date.now();
+            updateWaitTime();
+            requestTimerId = window.setInterval(updateWaitTime, 1000);
+        }
+
+        function stopRequestTimer() {
+            if (requestTimerId) {
+                window.clearInterval(requestTimerId);
+                requestTimerId = null;
+            }
+            updateWaitTime();
+        }
+
+        function formatApiError(data) {
+            if (!data || typeof data !== 'object') return '';
+            const parts = [];
+            if (data.message) parts.push(`错误：${data.message}`);
+            if (data.last_endpoint) parts.push(`最后请求地址：${data.last_endpoint}`);
+            if (data.client_request_id) parts.push(`客户端请求 ID：${data.client_request_id}`);
+            if (Array.isArray(data.diagnostics) && data.diagnostics.length) {
+                parts.push('尝试过的地址：');
+                parts.push(...data.diagnostics);
+            }
+            return parts.join('\n');
+        }
+
+        function renderGenerateResult(data) {
+            const images = Array.isArray(data.images) ? data.images : [];
+            const videos = Array.isArray(data.videos) ? data.videos : [];
+            const mediaType = data.media_type || (videos.length ? 'video' : 'image');
+            const duration = Number(data.duration_ms);
+            stopRequestTimer();
+
+            document.getElementById('meta-panel').classList.remove('hidden');
+            document.getElementById('meta-req-id').innerText = data.client_request_id || 'N/A';
+            document.getElementById('meta-endpoint').innerText = data.endpoint || 'N/A';
+            document.getElementById('meta-duration').innerText = Number.isFinite(duration) ? `${duration} ms` : 'N/A';
+            document.getElementById('meta-status').innerText = `完成 (${mediaType === 'video' ? videos.length : images.length})`;
+            document.getElementById('request-hint').classList.add('hidden');
+
+            renderGeneratedMedia(images, videos);
+            if (videos.length) {
+                updateStatusText(`生成完成，返回 ${videos.length} 个视频。`);
+            } else {
+                updateStatusText(images.length ? `生成完成，返回 ${images.length} 张图像。` : '生成完成，但没有返回图像或视频。');
+            }
+            setLoadingState(false);
+        }
+
+        function updateStatusText(text) {
+            document.getElementById('job-status-desc').innerText = text;
+        }
+
+        function setLoadingState(isLoading) {
+            const btn = document.getElementById('submit-btn');
+            const loader = document.getElementById('loader');
+            if (isLoading) {
+                btn.disabled = true;
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+                loader.classList.remove('hidden');
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                loader.classList.add('hidden');
+            }
+        }
+
+        function hidePanels() {
+            document.getElementById('diagnostic-panel').classList.add('hidden');
+            document.getElementById('meta-panel').classList.add('hidden');
+            document.getElementById('request-hint').classList.add('hidden');
+        }
+
+        function showError(title, details) {
+            updateStatusText('操作终止。');
+            document.getElementById('diagnostic-panel').classList.remove('hidden');
+            document.getElementById('error-message').innerText = title;
+            document.getElementById('diagnostic-details').innerText = details || "无更深入的报错上下文";
+        }
+
+        function resetImageGrid() {
+            const config = getProtocolConfig();
+            const grid = document.getElementById('image-grid');
+            grid.innerHTML = `
+                <div class="border border-dashed border-slate-200 rounded-xl aspect-square flex flex-col items-center justify-center text-slate-400 bg-slate-50/30">
+                    <svg class="w-8 h-8 opacity-40 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V6.75zm.375 0a.375 0 11-.75 0 .375 0 017.75 0z" /></svg>
+                    <span class="text-xs">${config.pendingText}</span>
+                </div>
+            `;
+        }
+
+        function createImageCard(imageSrc, slot) {
+            const wrapper = document.createElement('div');
+            wrapper.className = "group relative border border-slate-200 rounded-xl overflow-hidden shadow-sm bg-slate-100 aspect-square hover:shadow transition";
+            wrapper.innerHTML = `
+                <button type="button" class="absolute inset-0 z-10" aria-label="放大预览"></button>
+                <img class="w-full h-full object-cover" alt="Generated Image ${slot}">
+                <div class="absolute left-3 top-3 z-20 text-[11px] px-2 py-1 rounded-full bg-white/90 text-slate-700 border border-slate-200 shadow-sm"># ${slot}</div>
+                <div class="absolute right-3 top-3 z-20 text-[11px] px-2 py-1 rounded-full bg-emerald-600 text-white">已完成</div>
+                <div class="absolute inset-x-0 bottom-0 z-20 bg-slate-900/45 text-white text-xs px-3 py-2 flex items-center justify-between">
+                    <span class="truncate">最终图像，可点击放大预览</span>
+                    <a class="hidden bg-white/90 hover:bg-white text-slate-800 text-xs px-2.5 py-1 rounded shadow font-medium transition" download>下载文件</a>
+                </div>
+            `;
+            const image = wrapper.querySelector('img');
+            const previewButton = wrapper.querySelector('button');
+            const footer = wrapper.querySelectorAll('div')[2];
+            const downloadLink = footer.querySelector('a');
+            image.src = imageSrc;
+            previewButton.onclick = () => openLightbox(imageSrc, `图像 #${slot}`);
+            downloadLink.classList.remove('hidden');
+            downloadLink.href = imageSrc;
+            downloadLink.download = `image_${Date.now()}_${slot}.png`;
+            return wrapper;
+        }
+
+        function createVideoCard(videoSrc, slot) {
+            const wrapper = document.createElement('div');
+            wrapper.className = "group relative border border-slate-200 rounded-xl overflow-hidden shadow-sm bg-slate-950 aspect-video hover:shadow transition";
+            wrapper.innerHTML = `
+                <video class="w-full h-full object-contain bg-slate-950" controls playsinline preload="metadata"></video>
+                <div class="absolute left-3 top-3 z-20 text-[11px] px-2 py-1 rounded-full bg-white/90 text-slate-700 border border-slate-200 shadow-sm"># ${slot}</div>
+                <div class="absolute right-3 top-3 z-20 text-[11px] px-2 py-1 rounded-full bg-emerald-600 text-white">已完成</div>
+                <div class="absolute inset-x-0 bottom-0 z-20 bg-slate-900/55 text-white text-xs px-3 py-2 flex items-center justify-between">
+                    <button type="button" class="truncate text-left hover:underline">视频预览</button>
+                    <a class="bg-white/90 hover:bg-white text-slate-800 text-xs px-2.5 py-1 rounded shadow font-medium transition" download>下载文件</a>
+                </div>
+            `;
+            const video = wrapper.querySelector('video');
+            const previewButton = wrapper.querySelector('button');
+            const downloadLink = wrapper.querySelector('a');
+            video.src = videoSrc;
+            previewButton.onclick = () => openVideoLightbox(videoSrc, `视频 #${slot}`);
+            downloadLink.href = videoSrc;
+            downloadLink.download = `video_${Date.now()}_${slot}.mp4`;
+            return wrapper;
+        }
+
+        function renderGeneratedMedia(images, videos) {
+            const grid = document.getElementById('image-grid');
+            if (!images.length && !videos.length) {
+                grid.innerHTML = `
+                    <div class="border border-dashed border-slate-200 rounded-xl aspect-square flex flex-col items-center justify-center text-slate-400 bg-slate-50/30">
+                        <span class="text-xs">接口完成但没有返回图像或视频</span>
+                    </div>
+                `;
+                return;
+            }
+            grid.innerHTML = '';
+            images.forEach((imageSrc, index) => {
+                grid.appendChild(createImageCard(imageSrc, index + 1));
+            });
+            videos.forEach((videoSrc, index) => {
+                grid.appendChild(createVideoCard(videoSrc, images.length + index + 1));
+            });
+        }
+
+        function renderGeneratedImages(images) {
+            renderGeneratedMedia(images, []);
+        }
+
+        document.getElementById('reference-dropzone').addEventListener('dragover', (event) => {
+            event.preventDefault();
+            event.currentTarget.classList.add('bg-slate-50', 'border-slate-400');
+        });
+
+        document.getElementById('reference-dropzone').addEventListener('dragleave', (event) => {
+            event.preventDefault();
+            event.currentTarget.classList.remove('bg-slate-50', 'border-slate-400');
+        });
+
+        document.getElementById('reference-dropzone').addEventListener('drop', async (event) => {
+            event.preventDefault();
+            event.currentTarget.classList.remove('bg-slate-50', 'border-slate-400');
+            try {
+                await addReferenceFiles(Array.from(event.dataTransfer?.files || []));
+            } catch (error) {
+                alert(error instanceof Error ? error.message : String(error));
+            }
+        });
+
+        ['model', 'base_url'].forEach((id) => {
+            const el = document.getElementById(id);
+            el.addEventListener('input', renderReferenceImages);
+            el.addEventListener('change', renderReferenceImages);
+        });
+
+        applyProtocolPreset();
+        resetImageGrid();
+    </script>
+</body>
 </html>

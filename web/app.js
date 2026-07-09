@@ -1,9 +1,21 @@
 const STORAGE_KEY = 'openai-image-client-web:v3';
+const DEFAULT_GENERATE_MODEL = 'gpt-image-2';
+const DEFAULT_EDIT_MODEL = 'grok-imagine';
+const DEFAULT_VIDEO_MODEL = 'grok-imagine-video-1.5';
+const MANAGED_DEFAULT_MODELS = new Set([
+  DEFAULT_GENERATE_MODEL,
+  DEFAULT_EDIT_MODEL,
+  'grok-imagine-edit',
+  'grok-imagine-image',
+  'grok-imagine-image-quality',
+  DEFAULT_VIDEO_MODEL,
+  'grok-imagine-video',
+]);
 
 const defaults = {
   baseUrl: '',
   apiKey: '',
-  model: 'gpt-image-2',
+  model: DEFAULT_GENERATE_MODEL,
   count: 1,
   timeout: 120,
   prompt: '',
@@ -183,6 +195,39 @@ function getModeLabel(mode) {
   return mode === 'edit' ? '图生图' : '文生图';
 }
 
+function getEntryModeLabel(entry) {
+  if (entry?.mediaType === 'video' || isVideoEntry(entry)) {
+    return entry.mode === 'edit' ? '图生视频' : '文生视频';
+  }
+  return getModeLabel(entry?.mode);
+}
+
+function isVideoModel(model) {
+  return String(model || '').trim().toLowerCase().startsWith('grok-imagine-video');
+}
+
+function protocolFromModel(model) {
+  const value = String(model || '').trim().toLowerCase();
+  return value.startsWith('grok-imagine')
+    ? 'grok'
+    : 'openai';
+}
+
+function isVideoEntry(entry) {
+  return entry?.mediaType === 'video' || (Array.isArray(entry?.videos) && entry.videos.length > 0);
+}
+
+function getEntryMediaItems(entry) {
+  if (isVideoEntry(entry)) {
+    return Array.isArray(entry.videos)
+      ? entry.videos.map((src, mediaIndex) => ({ entryId: entry.id, type: 'video', src, mediaIndex }))
+      : [];
+  }
+  return Array.isArray(entry.images)
+    ? entry.images.map((src, mediaIndex) => ({ entryId: entry.id, type: 'image', src, mediaIndex }))
+    : [];
+}
+
 function updatePromptPlaceholder(mode) {
   els.prompt.placeholder = mode === 'edit'
     ? '请输入你希望在参考图基础上生成的效果，例如：保留主体姿态，改成赛博朋克夜景风格...'
@@ -245,12 +290,29 @@ function updateSizeModeUI(mode) {
   els.customSizePanel.classList.toggle('hidden', preset);
 }
 
+function defaultModelForMode(mode) {
+  return mode === 'edit' ? DEFAULT_EDIT_MODEL : DEFAULT_GENERATE_MODEL;
+}
+
+function shouldAutoSwitchModel(model) {
+  const value = String(model || '').trim();
+  return !value || MANAGED_DEFAULT_MODELS.has(value);
+}
+
+function syncDefaultModelForMode(mode) {
+  if (shouldAutoSwitchModel(els.model.value)) {
+    els.model.value = defaultModelForMode(mode);
+  }
+}
+
 function updateImageModeUI(mode) {
-  const isEdit = mode === 'edit';
+  const normalizedMode = mode === 'edit' ? 'edit' : 'generate';
+  syncDefaultModelForMode(normalizedMode);
+  const isEdit = normalizedMode === 'edit';
   els.imageModeGenerate.classList.toggle('active', !isEdit);
   els.imageModeEdit.classList.toggle('active', isEdit);
   els.editImagePanel.classList.toggle('hidden', !isEdit);
-  updatePromptPlaceholder(mode);
+  updatePromptPlaceholder(normalizedMode);
   renderEditImagePreview();
 }
 
@@ -306,7 +368,7 @@ function hydrateForm(state) {
   els.customWidth.value = Number(state.customWidth || defaults.customWidth);
   els.customHeight.value = Number(state.customHeight || defaults.customHeight);
   updateSizeModeUI(state.sizeMode || defaults.sizeMode);
-  updateSummary({ ...defaults, ...state });
+  updateSummary(currentState());
 }
 
 function normalizeCustomInputs() {
@@ -485,12 +547,12 @@ function renderEmptyHistory(message = '填写连接设置与提示词后，点�
 }
 
 function getPendingMeta(entry) {
-  return `模式：${getModeLabel(entry.mode)} · 模型：${entry.model} · 尺寸：${entry.size} · 当前任务：${entry.sequence}/${entry.total} · 已等待 ${formatClock(entry.elapsedMs || 0)}`;
+  return `模式：${getEntryModeLabel(entry)} · 模型：${entry.model} · 尺寸：${entry.size} · 当前任务：${entry.sequence}/${entry.total} · 已等待 ${formatClock(entry.elapsedMs || 0)}`;
 }
 
 function getSuccessMeta(entry) {
   const parts = [
-    `模式：${getModeLabel(entry.mode)}`,
+    `模式：${getEntryModeLabel(entry)}`,
     `完成时间：${formatDateTime(entry.createdAt)}`,
     `模型：${entry.model}`,
     `尺寸：${entry.size}`,
@@ -507,7 +569,7 @@ function getSuccessMeta(entry) {
 
 function getErrorMeta(entry) {
   const parts = [
-    `模式：${getModeLabel(entry.mode)}`,
+    `模式：${getEntryModeLabel(entry)}`,
     `失败时间：${formatDateTime(entry.createdAt)}`,
     `模型：${entry.model}`,
     `尺寸：${entry.size}`,
@@ -553,7 +615,7 @@ function getEntryStatusConfig(entry) {
 function getEntryPlaceholderText(entry) {
   if (entry.status === 'pending') return '生成中';
   if (entry.status === 'error') return '生成失败';
-  return '没有返回图片';
+  return '没有返回媒体';
 }
 
 function findEntryOrderById(id) {
@@ -567,22 +629,23 @@ function ensureSelectedHistoryId() {
 }
 
 function getPreviewGalleryItems() {
-  return historyEntries.flatMap((entry) => (
-    Array.isArray(entry.images)
-      ? entry.images.map((src, imageIndex) => ({ entryId: entry.id, src, imageIndex }))
-      : []
-  ));
+  return historyEntries.flatMap((entry) => getEntryMediaItems(entry));
 }
 
 function openEntryPreview(entry) {
-  if (!Array.isArray(entry.images) || !entry.images.length) return;
-  const previewItems = getPreviewGalleryItems();
+  const entryItems = getEntryMediaItems(entry);
+  if (!entryItems.length) return;
+  if (entryItems[0].type === 'video') {
+    window.open(entryItems[0].src, '_blank', 'noopener');
+    return;
+  }
+  const previewItems = getPreviewGalleryItems().filter((item) => item.type === 'image');
   const previewIndex = previewItems.findIndex((item) => item.entryId === entry.id);
   if (previewIndex >= 0) {
     openLightbox(previewItems.map((item) => item.src), previewIndex);
     return;
   }
-  openLightbox(entry.images, 0);
+  openLightbox(entryItems.map((item) => item.src), 0);
 }
 
 function createImageCard(entry, order) {
@@ -592,6 +655,8 @@ function createImageCard(entry, order) {
   const chip = node.querySelector('.image-chip');
   const placeholder = node.querySelector('.image-placeholder');
   const status = getEntryStatusConfig(entry);
+  const mediaItems = getEntryMediaItems(entry);
+  const primaryMedia = mediaItems[0] || null;
 
   node.dataset.entryId = entry.id;
   node.classList.toggle('is-selected', entry.id === selectedHistoryId);
@@ -604,9 +669,19 @@ function createImageCard(entry, order) {
   chip.textContent = status.chipText;
   chip.className = `image-chip ${status.chipClass}`;
 
-  if (Array.isArray(entry.images) && entry.images[0]) {
-    img.src = entry.images[0];
+  if (primaryMedia?.type === 'image') {
+    img.src = primaryMedia.src;
     img.alt = `generated image ${order}`;
+    placeholder.classList.add('hidden');
+  } else if (primaryMedia?.type === 'video') {
+    const video = document.createElement('video');
+    video.className = 'image-card-video';
+    video.src = primaryMedia.src;
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    img.replaceWith(video);
     placeholder.classList.add('hidden');
   } else {
     img.removeAttribute('src');
@@ -641,20 +716,30 @@ function renderHistoryDetail(container, entry, order) {
   const status = getEntryStatusConfig(entry);
   const card = document.createElement('article');
   card.className = 'history-detail-card';
+  const mediaItems = getEntryMediaItems(entry);
+  const primaryMedia = mediaItems[0] || null;
 
-  const preview = document.createElement(Array.isArray(entry.images) && entry.images[0] ? 'button' : 'div');
+  const preview = document.createElement(primaryMedia ? 'button' : 'div');
   preview.className = 'history-detail-preview';
   if (preview instanceof HTMLButtonElement) {
     preview.type = 'button';
     preview.addEventListener('click', () => openEntryPreview(entry));
   }
 
-  if (Array.isArray(entry.images) && entry.images[0]) {
+  if (primaryMedia?.type === 'image') {
     const img = document.createElement('img');
     img.className = 'history-detail-image';
-    img.src = entry.images[0];
+    img.src = primaryMedia.src;
     img.alt = `generated image ${order}`;
     preview.appendChild(img);
+  } else if (primaryMedia?.type === 'video') {
+    const video = document.createElement('video');
+    video.className = 'history-detail-video';
+    video.src = primaryMedia.src;
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    preview.appendChild(video);
   } else {
     const placeholder = document.createElement('div');
     placeholder.className = 'history-detail-placeholder';
@@ -673,7 +758,7 @@ function renderHistoryDetail(container, entry, order) {
 
   const modeTag = document.createElement('div');
   modeTag.className = 'mini-tag mini-tag-white';
-  modeTag.textContent = getModeLabel(entry.mode);
+  modeTag.textContent = getEntryModeLabel(entry);
   tagRow.appendChild(modeTag);
 
   const statusBadge = document.createElement('div');
@@ -726,19 +811,21 @@ function renderHistoryDetail(container, entry, order) {
   const actions = document.createElement('div');
   actions.className = 'history-detail-actions';
 
-  if (Array.isArray(entry.images) && entry.images[0]) {
+  if (primaryMedia) {
     const previewBtn = document.createElement('button');
     previewBtn.className = 'btn btn-white neo-interactive btn-sm';
     previewBtn.type = 'button';
-    previewBtn.textContent = '放大预览';
+    previewBtn.textContent = primaryMedia.type === 'video' ? '打开视频' : '放大预览';
     previewBtn.addEventListener('click', () => openEntryPreview(entry));
     actions.appendChild(previewBtn);
 
     const downloadLink = document.createElement('a');
     downloadLink.className = 'btn btn-green neo-interactive btn-sm download-link';
-    downloadLink.href = entry.images[0];
-    downloadLink.download = `generated-${entry.createdAt || Date.now()}-${order}.png`;
-    downloadLink.textContent = '下载图片';
+    downloadLink.href = primaryMedia.src;
+    downloadLink.download = primaryMedia.type === 'video'
+      ? `generated-${entry.createdAt || Date.now()}-${order}.mp4`
+      : `generated-${entry.createdAt || Date.now()}-${order}.png`;
+    downloadLink.textContent = primaryMedia.type === 'video' ? '下载视频' : '下载图片';
     actions.appendChild(downloadLink);
   }
 
@@ -866,7 +953,9 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
     createdAt: Date.now(),
     startedAt: Date.now(),
     elapsedMs: 0,
+    mediaType: isVideoModel(state.model) ? 'video' : 'image',
     images: [],
+    videos: [],
     errorMessage: '',
     sourceImageDataUrl: state.imageMode === 'edit' ? (editImageState?.dataUrl || '') : '',
     sourceImageName: state.imageMode === 'edit' ? (editImageState?.name || '') : '',
@@ -882,11 +971,17 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
       api_key: state.apiKey,
       prompt: state.prompt,
       model: state.model,
+      protocol: protocolFromModel(state.model),
       size: sizeValue,
       n: 1,
       timeout: state.timeout,
       mode: state.imageMode || 'generate',
     };
+    if (isVideoModel(state.model)) {
+      requestPayload.video_resolution = '720p';
+      requestPayload.duration = 10;
+      requestPayload.poll_interval = 5;
+    }
     if (requestPayload.mode === 'edit' && editImageState) {
       requestPayload.edit_image = {
         name: editImageState.name,
@@ -935,7 +1030,9 @@ async function runSingleGenerateTask(state, sizeValue, sequence, total) {
     entry.elapsedMs = Date.now() - entry.startedAt;
     stopRequestTimer();
     entry.status = 'success';
+    entry.mediaType = finalData.media_type || (Array.isArray(finalData.videos) && finalData.videos.length ? 'video' : 'image');
     entry.images = Array.isArray(finalData.images) ? finalData.images : [];
+    entry.videos = Array.isArray(finalData.videos) ? finalData.videos : [];
     entry.durationMs = typeof finalData.duration_ms === 'number' ? finalData.duration_ms : entry.elapsedMs;
     entry.endpoint = finalData.endpoint || '';
     entry.clientRequestId = finalData.client_request_id || '';
@@ -972,7 +1069,7 @@ async function generate() {
   }
   if (state.imageMode === 'edit' && !editImageState) {
     setStatus('warning', '缺少参考图');
-    return showError('图生图模式下请先上传一张参考图');
+    return showError(isVideoModel(state.model) ? '图生视频模式下请先上传一张参考图' : '图生图模式下请先上传一张参考图');
   }
   if (size.error) {
     setStatus('warning', '尺寸配置错误');
