@@ -2,36 +2,32 @@
 
 [中文说明](README.md)
 
-## Live Demo
-
-🔗 https://image.hyhschool.com/
-
-A lightweight OpenAI-compatible text-to-image / image-to-image client with two usage modes:
+A lightweight OpenAI / Grok Imagine image and video generation client with two usage modes:
 
 1. Python CLI script
 2. Local Web UI
 
-It works well with OpenAI Images API-compatible gateways, proxies, or self-hosted relay services.
-
-## Updated Web UI Screenshot
-
-![OpenAI Image Client Updated Web UI](assets/web-ui-image-mode.png)
+It works well with OpenAI Images API-compatible and xAI Grok Imagine-compatible gateways, proxies, or self-hosted relay services.
 
 ---
 
 ## Features
 
 - Compatible with `POST /v1/images/generations`, `POST /v1/images/edits`, and xAI `POST /v1/videos/generations`
-- Supports the OpenAI `gpt-image-2` image protocol, Grok Imagine `grok-imagine-image`, and `grok-imagine-video`
-- `protocol=auto` selects by model name or xAI Base URL; `openai` / `grok` can be forced
-- Supports both text-to-image and image-to-image modes
+- The Web UI splits work protocols into `OpenAI Image`, `Grok Image`, and `Grok Video`
+- The model dropdown changes automatically based on the selected protocol
+- OpenAI image generation supports `gpt-image-2`
+- Grok image generation supports `grok-imagine`, `grok-imagine-edit`, `grok-imagine-image`, and `grok-imagine-image-quality`
+- Grok video generation supports `grok-imagine-video-1.5` and `grok-imagine-video`
+- CLI `protocol=auto` selects by model name or xAI Base URL; `openai` / `grok` can be forced
+- Supports text-to-image, image-to-image, text-to-video, and image-to-video
 - Image-to-image supports reference upload, drag-and-drop, preview, and removal
 - Accepts either an API root URL or a full image endpoint
 - Includes both CLI and Web UI
 - Web settings are stored only in browser `localStorage`
 - The backend does not save frontend settings or create backups
 - Supports upstream responses with either `b64_json` or `url`
-- `grok-imagine-video` automatically creates a video job, polls the returned `request_id`, and returns the final video URL
+- Grok video automatically creates a video job, polls the returned `request_id`, and returns the final video URL
 
 ---
 
@@ -152,13 +148,15 @@ python generate_image.py \
 ### Highlights
 
 - Neo-Brutalism style interface
-- Supports both text-to-image and image-to-image modes
-- Image-to-image supports reference upload, drag-and-drop, local preview, and removal
+- Protocol is selected with segmented buttons: `OpenAI Image`, `Grok Image`, and `Grok Video`
+- Model is selected from a protocol-aware dropdown
+- Supports text-to-image, image-to-image, text-to-video, and image-to-video
+- Reference images support upload, drag-and-drop, local preview, and removal
 - Image history stays in a single result area
-- Click an image to show details and prompt on the right
-- Built-in image preview
+- Click an image or video to show details and prompt on the right
+- Built-in image preview and video playback
 - Multi-image requests are split into sequential single tasks
-- Long-running generation requests now use async job polling to reduce browser-side `Failed to fetch` issues
+- Long-running image and video requests use async job polling to reduce browser-side `Failed to fetch` issues
 - All frontend settings are automatically stored in the current browser
 
 ### Start
@@ -180,9 +178,11 @@ http://127.0.0.1:8000
 
 - `Base URL` can be an API root, for example `https://your-api-host.com`
 - It can also be a full endpoint, for example `https://your-api-host.com/v1/images/generations`
-- `Protocol` defaults to auto detection; `grok-imagine-image...`, `grok-imagine-video...`, or xAI Base URLs use the Grok JSON protocol
+- The Web UI `Protocol` options are `OpenAI Image`, `Grok Image`, and `Grok Video`
+- `Model` is a dropdown, and its options change with the selected protocol
+- CLI `--protocol auto` detects the protocol from the model name or xAI Base URL
 - Image-to-image mode automatically switches to a compatible `images/edits` endpoint; OpenAI/GPT uses multipart while Grok uses JSON
-- When the model is `grok-imagine-video`, the backend calls `videos/generations` and the Web UI renders a video player
+- Grok video calls `videos/generations`, and the Web UI renders a video player
 - Reference images are kept only in browser memory and are not backed up by the backend
 - Long-running tasks are created as jobs first and then polled by the frontend
 - If the upstream returns `b64_json`, the page displays it directly
@@ -192,6 +192,13 @@ http://127.0.0.1:8000
 ---
 
 ## Changelog
+
+### 2026-07-09
+- Added Grok Imagine video support for text-to-video and image-to-video
+- Changed the Web UI protocol selector to three work modes: `OpenAI Image`, `Grok Image`, and `Grok Video`
+- Changed `Model` to a dropdown with options driven by the selected protocol
+- Protocol switching now updates helper text, reference image limits, video options, and submit button text
+- Removed the live demo link and Web UI screenshot asset from the README
 
 ### 2026-04-28
 - Added image-to-image mode

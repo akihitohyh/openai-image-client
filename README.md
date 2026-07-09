@@ -2,36 +2,32 @@
 
 [English README](README_EN.md)
 
-## 在线试用
-
-🔗 https://image.hyhschool.com/
-
-一个简洁的 OpenAI 风格文生图 / 图生图客户端，包含两种使用方式：
+一个简洁的 OpenAI / Grok Imagine 图片与视频生成客户端，包含两种使用方式：
 
 1. Python CLI 脚本
 2. 本地 Web UI
 
-适合接兼容 OpenAI Images API 的中转服务、自建代理或网关。
-
-## 新版 Web UI 截图
-
-![OpenAI Image Client 最新 Web UI](assets/web-ui-image-mode.png)
+适合接兼容 OpenAI Images API、xAI Grok Imagine API 的中转服务、自建代理或网关。
 
 ---
 
 ## 特性
 
 - 兼容 `POST /v1/images/generations`、`POST /v1/images/edits` 与 xAI `POST /v1/videos/generations`
-- 支持 `gpt-image-2` OpenAI 图片协议、`grok-imagine-image` Grok Imagine 图片协议与 `grok-imagine-video` 视频协议
-- `protocol=auto` 会按模型名或 xAI Base URL 自动选择协议，也可强制 `openai` / `grok`
-- 支持文生图 / 图生图双模式
+- Web UI 按作业协议分为 `OpenAI 生图`、`Grok 生图`、`Grok 视频`
+- 模型下拉框会随协议自动切换可选项
+- OpenAI 生图支持 `gpt-image-2`
+- Grok 生图支持 `grok-imagine`、`grok-imagine-edit`、`grok-imagine-image`、`grok-imagine-image-quality`
+- Grok 视频支持 `grok-imagine-video-1.5`、`grok-imagine-video`
+- CLI 的 `protocol=auto` 会按模型名或 xAI Base URL 自动选择协议，也可强制 `openai` / `grok`
+- 支持文生图 / 图生图 / 文生视频 / 图生视频
 - 图生图支持参考图上传、拖拽、预览与移除
 - 支持填 API 根地址或完整图片接口地址
 - 同时提供 CLI 和 Web UI
 - Web 设置只保存在浏览器本地 `localStorage`
 - 后端不保存前端设置、不做备份
 - 支持上游返回 `b64_json` 或 `url`
-- `grok-imagine-video` 会自动创建视频任务并轮询 `request_id`，完成后返回视频 URL
+- Grok 视频会自动创建视频任务并轮询 `request_id`，完成后返回视频 URL
 
 ---
 
@@ -152,13 +148,15 @@ python generate_image.py \
 ### 特点
 
 - Neo-Brutalism 风格页面
-- 支持文生图 / 图生图双模式
-- 图生图支持上传参考图、拖拽上传、本地预览与移除
+- 作业协议使用分段按钮：`OpenAI 生图`、`Grok 生图`、`Grok 视频`
+- 模型使用下拉框，并按当前协议展示对应模型
+- 支持文生图 / 图生图 / 文生视频 / 图生视频
+- 参考图支持上传、拖拽上传、本地预览与移除
 - 图片历史保留在同一个结果区
-- 点击图片后右侧显示详细信息与提示词
-- 支持图片放大预览
+- 点击图片或视频后右侧显示详细信息与提示词
+- 支持图片放大预览与视频播放
 - 多图请求会拆成串行单任务执行
-- 长耗时生图请求改为异步任务轮询，减少浏览器侧 `Failed to fetch`
+- 长耗时图片与视频请求改为异步任务轮询，减少浏览器侧 `Failed to fetch`
 - 所有前端设置自动保存在当前浏览器本地
 
 ### 启动
@@ -207,9 +205,11 @@ OpenAIImageClient.exe --no-open-browser
 
 - `Base URL` 可填 API 根地址，例如 `https://your-api-host.com`
 - 也可直接填完整接口地址，例如 `https://your-api-host.com/v1/images/generations`
-- `Protocol` 默认自动识别；模型名为 `grok-imagine-image...`、`grok-imagine-video...` 或 Base URL 为 xAI 时会走 Grok JSON 协议
+- Web UI 的 `Protocol` 分为 `OpenAI 生图`、`Grok 生图`、`Grok 视频`
+- `Model` 是下拉框，选项会随当前协议自动变化
+- CLI 的 `--protocol auto` 会按模型名或 xAI Base URL 自动识别协议
 - 图生图模式会自动请求兼容的 `images/edits` 接口；OpenAI/GPT 使用 multipart，Grok 使用 JSON
-- 模型填 `grok-imagine-video` 时会自动请求 `videos/generations`，前端结果区会显示视频播放器
+- Grok 视频会自动请求 `videos/generations`，前端结果区会显示视频播放器
 - 图生图参考图只保存在当前浏览器内存中，后端不做备份
 - 长耗时任务会先创建 job，再由前端轮询结果
 - 如果上游返回 `b64_json`，页面会直接显示
@@ -219,6 +219,13 @@ OpenAIImageClient.exe --no-open-browser
 ---
 
 ## 更新记录
+
+### 2026-07-09
+- 新增 Grok Imagine 视频协议支持，包含文生视频与图生视频
+- Web UI 的协议改为 `OpenAI 生图`、`Grok 生图`、`Grok 视频` 三段式作业模式
+- `Model` 改为下拉框，并按当前协议展示对应模型
+- 协议切换时同步更新下方文案、参考图数量限制、视频选项与提交按钮文案
+- README 移除在线试用入口和 Web UI 截图资源
 
 ### 2026-04-28
 - 新增图生图模式
