@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openai-image-client-mcp"
+version = "0.2.0"
+description = "Local stdio and multi-tenant HTTP MCP server for the OpenAI-compatible image client"
+readme = "README_EN.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "anyio>=4.5,<5",
+  "mcp==1.28.1",
+  "Pillow>=12.0,<13",
+  "pydantic>=2.11,<3",
+  "requests>=2.31,<3",
+  "starlette>=0.50,<2",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+openai-image-client-mcp = "mcp_server:main"
+openai-image-client-mcp-http = "mcp_http_server:main"
+
+[tool.setuptools]
+packages = ["openai_image_client"]
+py-modules = ["mcp_server", "mcp_http_server", "web_app"]

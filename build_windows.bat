@@ -18,7 +18,7 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto :error
 
-".venv\Scripts\python.exe" -m pip install -r requirements.txt pyinstaller
+".venv\Scripts\python.exe" -m pip install -r requirements.txt "pyinstaller>=6,<7"
 if errorlevel 1 goto :error
 
 ".venv\Scripts\pyinstaller.exe" --clean --noconfirm OpenAIImageClient.spec

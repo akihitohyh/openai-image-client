@@ -1,0 +1,4 @@
+-r requirements-mcp.txt
+pytest>=8,<10
+pytest-asyncio>=0.24,<2
+pyinstaller>=6,<7

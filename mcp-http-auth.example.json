@@ -1,0 +1,22 @@
+{
+  "tenants": [
+    {
+      "tenant_id": "codex-personal",
+      "token_env": "OPENAI_IMAGE_MCP_TENANT_CODEX_TOKEN",
+      "allowed_profiles": [
+        "openai"
+      ],
+      "default_profile": "openai",
+      "scopes": [
+        "mcp:use",
+        "image:generate",
+        "image:upload",
+        "image:read",
+        "image:cancel"
+      ],
+      "requests_per_minute": 30,
+      "operations_per_minute": 300,
+      "expires_at": null
+    }
+  ]
+}

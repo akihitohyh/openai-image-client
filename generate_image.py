@@ -6,6 +6,7 @@ import base64
 import json
 import math
 import mimetypes
+import os
 import sys
 import time
 import uuid
@@ -22,6 +23,8 @@ CONFIG_CANDIDATES = [
     ROOT / "config.json",
 ]
 OUTPUT_DIR = ROOT / "outputs"
+MAX_INPUT_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 IMAGE_QUALITY_VALUES = {"auto", "low", "medium", "high"}
 OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
@@ -89,6 +92,11 @@ def load_config() -> dict[str, Any]:
     for path in CONFIG_CANDIDATES:
         if not path.exists():
             continue
+        if os.name == "posix" and path.stat().st_mode & 0o077:
+            print(
+                f"警告：{path.name} 可能包含 API Key，但当前权限不是 0600；请执行 chmod 600 {path}",
+                file=sys.stderr,
+            )
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -404,7 +412,18 @@ def save_b64_image(image_b64: str, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if image_b64.startswith("data:") and "," in image_b64:
         image_b64 = image_b64.split(",", 1)[1]
-    output_path.write_bytes(base64.b64decode(image_b64))
+    max_encoded_size = ((MAX_DOWNLOAD_BYTES + 2) // 3) * 4
+    if len(image_b64) > max_encoded_size:
+        raise ValueError(f"媒体文件超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB 限制")
+    decoded = base64.b64decode(image_b64)
+    if len(decoded) > MAX_DOWNLOAD_BYTES:
+        raise ValueError(f"媒体文件超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB 限制")
+    temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.part")
+    try:
+        temporary_path.write_bytes(decoded)
+        temporary_path.replace(output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def new_session(use_proxy: bool) -> requests.Session:
@@ -416,9 +435,25 @@ def new_session(use_proxy: bool) -> requests.Session:
 
 def save_url_image(session: requests.Session, image_url: str, output_path: Path, timeout: int) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    response = session.get(image_url, timeout=timeout)
-    response.raise_for_status()
-    output_path.write_bytes(response.content)
+    temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.part")
+    try:
+        with session.get(image_url, timeout=timeout, stream=True) as response:
+            response.raise_for_status()
+            declared_size = int(response.headers.get("Content-Length") or 0)
+            if declared_size > MAX_DOWNLOAD_BYTES:
+                raise RequestException(f"媒体文件超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB 限制")
+            downloaded = 0
+            with temporary_path.open("wb") as output_file:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if downloaded > MAX_DOWNLOAD_BYTES:
+                        raise RequestException(f"媒体文件超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB 限制")
+                    output_file.write(chunk)
+        temporary_path.replace(output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def save_url_pointer(image_url: str, output_path: Path) -> None:
@@ -449,6 +484,8 @@ def load_image_paths(raw_paths: list[str]) -> list[Path]:
             raise SystemExit(f"参考图不存在: {path}")
         if not path.is_file():
             raise SystemExit(f"参考图不是文件: {path}")
+        if path.stat().st_size > MAX_INPUT_IMAGE_BYTES:
+            raise SystemExit(f"参考图超过 {MAX_INPUT_IMAGE_BYTES // (1024 * 1024)} MB 限制: {path}")
         paths.append(path)
     return paths
 
@@ -810,11 +847,11 @@ def main() -> int:
     config = load_config()
 
     base_url = prompt_if_missing(
-        args.base_url or config_text(config, "base_url"),
+        args.base_url or os.environ.get("OPENAI_IMAGE_BASE_URL", "") or config_text(config, "base_url"),
         "请输入 Base URL",
     )
     api_key = prompt_if_missing(
-        args.api_key or config_text(config, "api_key"),
+        args.api_key or os.environ.get("OPENAI_IMAGE_API_KEY", "") or config_text(config, "api_key"),
         "请输入 API Key",
         secret=True,
     )
@@ -872,6 +909,10 @@ def main() -> int:
         raise SystemExit("n 必须大于等于 1")
     if image_count > 10:
         raise SystemExit("n 最大为 10")
+    if not 5 <= timeout <= 3600:
+        raise SystemExit("timeout 必须在 5 到 3600 秒之间")
+    if not 1 <= poll_interval <= 60:
+        raise SystemExit("poll_interval 必须在 1 到 60 秒之间")
 
     json_payload: dict[str, Any] | None = None
     form_data: dict[str, str] | None = None
@@ -939,7 +980,7 @@ def main() -> int:
     if is_video:
         if json_payload is None:
             raise SystemExit("视频请求体构建失败")
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         output_root = Path(args.output).expanduser() if args.output else OUTPUT_DIR
         output_root.mkdir(parents=True, exist_ok=True)
         saved_files: list[Path] = []
@@ -959,9 +1000,9 @@ def main() -> int:
                 raise SystemExit(
                     f"视频任务完成但没有返回 video.url，客户端请求 ID: {client_request_id}, 请求地址: {endpoint}"
                 )
-            for video_url in videos:
+            for media_index, video_url in enumerate(videos, start=1):
                 suffix = suffix_from_url(video_url, ".mp4")
-                file_path = output_root / f"video-{stamp}-{index}{suffix}"
+                file_path = output_root / f"video-{stamp}-{index}-{media_index}{suffix}"
                 try:
                     save_url_image(session, video_url, file_path, timeout=timeout)
                 except RequestException as exc:
@@ -1065,7 +1106,7 @@ def main() -> int:
     if not isinstance(items, list) or not items:
         raise SystemExit(f"接口返回异常，未找到 data: {json.dumps(data, ensure_ascii=False)[:1000]}")
 
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     output_root = Path(args.output).expanduser() if args.output else OUTPUT_DIR
     output_root.mkdir(parents=True, exist_ok=True)
 

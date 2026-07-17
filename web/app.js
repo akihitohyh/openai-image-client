@@ -1,1242 +1,973 @@
-const STORAGE_KEY = 'openai-image-client-web:v3';
-const DEFAULT_GENERATE_MODEL = 'gpt-image-2';
-const DEFAULT_EDIT_MODEL = 'grok-imagine';
-const DEFAULT_VIDEO_MODEL = 'grok-imagine-video-1.5';
-const MANAGED_DEFAULT_MODELS = new Set([
-  DEFAULT_GENERATE_MODEL,
-  DEFAULT_EDIT_MODEL,
-  'grok-imagine-edit',
-  'grok-imagine-image',
-  'grok-imagine-image-quality',
-  DEFAULT_VIDEO_MODEL,
-  'grok-imagine-video',
-]);
+'use strict';
 
-const defaults = {
+const STORAGE_KEY = 'openai-image-client-web:settings:v4';
+const LEGACY_STORAGE_KEYS = ['openai-image-client-web:v3'];
+const POLL_INTERVAL_MS = 1500;
+const HISTORY_LIMIT = 12;
+const OPENAI_MAX_REFERENCE_IMAGES = 16;
+const GROK_MAX_REFERENCE_IMAGES = 3;
+const GROK_MAX_VIDEO_REFERENCE_IMAGES = 7;
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_REFERENCE_IMAGES_TOTAL_BYTES = 30 * 1024 * 1024;
+const ALLOWED_REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+
+const PROTOCOL_CONFIG = {
+  'openai-image': {
+    backendProtocol: 'openai',
+    defaultModel: 'gpt-image-2',
+    models: ['gpt-image-2'],
+    description: 'OpenAI 生图使用 Images API，适合 gpt-image-2。',
+    promptPlaceholder: '例如: A professional minimalist workspace, cinematic lighting...',
+    promptLabel: '提示词 (Prompt)',
+    generateLabel: '文生图 (Generate)',
+    editLabel: '图生图 (Edit)',
+    modeLabel: '作业模式',
+    referenceLabel: '参考图 (OpenAI 最多 16 张)',
+    uploadPlaceholder: '点击选择或追加参考图像',
+    sizeLabel: '分辨率 (Size)',
+    countLabel: '生成张数 (n)',
+    timeoutLabel: '超时断开 (秒)',
+    submitText: '发送生图请求',
+    waitingText: '正在等待图片异步任务',
+    maxReferenceImages: OPENAI_MAX_REFERENCE_IMAGES,
+    maxOutputs: 8,
+    isVideo: false,
+  },
+  'grok-image': {
+    backendProtocol: 'grok',
+    defaultModel: 'grok-imagine',
+    models: ['grok-imagine', 'grok-imagine-edit', 'grok-imagine-image', 'grok-imagine-image-quality'],
+    description: 'Grok 生图使用 Grok Imagine 图片协议，支持文生图和图生图。',
+    promptPlaceholder: '例如: A cinematic futuristic city at sunset, neon reflections...',
+    promptLabel: '提示词 (Prompt)',
+    generateLabel: '文生图 (Generate)',
+    editLabel: '图生图 (Edit)',
+    modeLabel: '作业模式',
+    referenceLabel: '参考图 (Grok 生图最多 3 张)',
+    uploadPlaceholder: '点击选择或追加参考图像',
+    sizeLabel: '分辨率 (Size)',
+    countLabel: '生成张数 (n)',
+    timeoutLabel: '超时断开 (秒)',
+    submitText: '发送 Grok 生图请求',
+    waitingText: '正在等待 Grok 图片异步任务',
+    maxReferenceImages: GROK_MAX_REFERENCE_IMAGES,
+    maxOutputs: 8,
+    isVideo: false,
+  },
+  'grok-video': {
+    backendProtocol: 'grok',
+    defaultModel: 'grok-imagine-video-1.5',
+    models: ['grok-imagine-video-1.5', 'grok-imagine-video'],
+    description: 'Grok 视频会创建异步任务并轮询结果，支持文生视频和图生视频。',
+    promptPlaceholder: '例如: A cinematic drone shot over a futuristic city at sunset, smooth camera movement...',
+    promptLabel: '视频提示词 (Prompt)',
+    generateLabel: '文生视频',
+    editLabel: '图生视频',
+    modeLabel: '视频模式',
+    referenceLabel: '参考图 (Grok 视频最多 7 张)',
+    uploadPlaceholder: '点击选择或追加视频参考图像',
+    sizeLabel: '画幅参考 (Aspect)',
+    countLabel: '生成视频数 (n)',
+    timeoutLabel: '任务超时 (秒)',
+    submitText: '发送 Grok 视频请求',
+    waitingText: '正在等待 Grok 视频异步任务',
+    maxReferenceImages: GROK_MAX_VIDEO_REFERENCE_IMAGES,
+    maxOutputs: 4,
+    isVideo: true,
+  },
+};
+
+const DEFAULT_SETTINGS = {
+  protocol: 'openai-image',
+  mode: 'generate',
   baseUrl: '',
-  apiKey: '',
-  model: DEFAULT_GENERATE_MODEL,
+  model: 'gpt-image-2',
+  size: '1024x1024',
   count: 1,
-  timeout: 120,
-  prompt: '',
-  imageMode: 'generate',
-  sizeMode: 'preset',
-  presetBase: '1K',
-  presetRatio: '1:1',
-  customWidth: 1024,
-  customHeight: 1024,
-  theme: 'light',
+  timeout: 500,
+  videoResolution: '720p',
+  duration: 10,
 };
 
-const examplePrompt = 'A cinematic futuristic city at sunset, wet streets, neon reflections, volumetric light, ultra detailed.';
-const baseMap = { '1K': 1024, '2K': 2048 };
-const ratioMap = {
-  '1:1': [1, 1],
-  '3:2': [3, 2],
-  '2:3': [2, 3],
-  '16:9': [16, 9],
-  '9:16': [9, 16],
-  '4:3': [4, 3],
-  '3:4': [3, 4],
-  '21:9': [21, 9],
-};
-const restrictedRatios = new Set(['16:9', '9:16']);
+const els = Object.fromEntries([
+  'service-status', 'config-form', 'base_url', 'api_key', 'protocol', 'protocol-control',
+  'protocol-desc', 'mode-control', 'mode-label', 'mode-generate', 'mode-edit',
+  'edit-image-container', 'reference-label', 'reference-dropzone', 'file-input',
+  'upload-placeholder', 'upload-preview-grid', 'upload-count', 'clear-upload-btn',
+  'prompt-label', 'prompt', 'model', 'size-label', 'size', 'video-options',
+  'video_resolution', 'duration', 'count-label', 'image_count', 'timeout-label',
+  'timeout', 'submit-btn', 'job-status-desc', 'loader', 'cancel-btn',
+  'clear-history-btn', 'diagnostic-panel', 'error-message', 'diagnostic-details',
+  'meta-panel', 'meta-req-id', 'meta-duration', 'meta-wait', 'meta-endpoint',
+  'meta-status', 'request-hint', 'request-message', 'request-elapsed', 'history-list',
+  'lightbox', 'lightbox-backdrop', 'lightbox-title', 'lightbox-close',
+  'lightbox-image', 'lightbox-video',
+].map((id) => [id, document.getElementById(id)]));
 
-let previewImages = [];
-let previewIndex = 0;
+let currentMode = 'generate';
+let uploadedReferenceImages = [];
+let activeTask = null;
+let taskTimerId = null;
 let historyEntries = [];
-let selectedHistoryId = null;
-let activePendingId = null;
-let activeTimerId = null;
-let editImageState = null;
-let dragDepth = 0;
+let lastFocusedElement = null;
 
-const els = {
-  baseUrl: document.getElementById('baseUrl'),
-  apiKey: document.getElementById('apiKey'),
-  model: document.getElementById('model'),
-  count: document.getElementById('count'),
-  timeout: document.getElementById('timeout'),
-  prompt: document.getElementById('prompt'),
-  generateBtn: document.getElementById('generateBtn'),
-  fillExampleBtn: document.getElementById('fillExampleBtn'),
-  clearPromptBtn: document.getElementById('clearPromptBtn'),
-  resetSettingsBtn: document.getElementById('resetSettingsBtn'),
-  clearHistoryBtn: document.getElementById('clearHistoryBtn'),
-  gallery: document.getElementById('gallery'),
-  errorBox: document.getElementById('errorBox'),
-  statusBadge: document.getElementById('statusBadge'),
-  metaInfo: document.getElementById('metaInfo'),
-  saveState: document.getElementById('saveState'),
-  imageCardTemplate: document.getElementById('imageCardTemplate'),
-  historyBoardTemplate: document.getElementById('historyBoardTemplate'),
-  statModel: document.getElementById('statModel'),
-  statSize: document.getElementById('statSize'),
-  statCount: document.getElementById('statCount'),
-  summaryBaseUrl: document.getElementById('summaryBaseUrl'),
-  summarySize: document.getElementById('summarySize'),
-  summaryTimeout: document.getElementById('summaryTimeout'),
-  summaryTheme: document.getElementById('summaryTheme'),
-  promptDesc: document.getElementById('promptDesc'),
-  modeBadge: document.getElementById('modeBadge'),
-  themeToggle: document.getElementById('themeToggle'),
-  imageModeGenerate: document.getElementById('imageModeGenerate'),
-  imageModeEdit: document.getElementById('imageModeEdit'),
-  editImagePanel: document.getElementById('editImagePanel'),
-  editImageInput: document.getElementById('editImageInput'),
-  editImageDropzone: document.getElementById('editImageDropzone'),
-  editImagePreviewCard: document.getElementById('editImagePreviewCard'),
-  editImagePreview: document.getElementById('editImagePreview'),
-  editImageMeta: document.getElementById('editImageMeta'),
-  clearEditImageBtn: document.getElementById('clearEditImageBtn'),
-  sizeModePreset: document.getElementById('sizeModePreset'),
-  sizeModeCustom: document.getElementById('sizeModeCustom'),
-  presetSizePanel: document.getElementById('presetSizePanel'),
-  customSizePanel: document.getElementById('customSizePanel'),
-  presetBase: document.getElementById('presetBase'),
-  presetRatio: document.getElementById('presetRatio'),
-  customWidth: document.getElementById('customWidth'),
-  customHeight: document.getElementById('customHeight'),
-  resolvedSizeBadge: document.getElementById('resolvedSizeBadge'),
-  lightbox: document.getElementById('lightbox'),
-  lightboxBackdrop: document.getElementById('lightboxBackdrop'),
-  lightboxImage: document.getElementById('lightboxImage'),
-  lightboxCounter: document.getElementById('lightboxCounter'),
-  lightboxPrev: document.getElementById('lightboxPrev'),
-  lightboxNext: document.getElementById('lightboxNext'),
-  lightboxClose: document.getElementById('lightboxClose'),
-};
-
-function clampInt(value, min, max) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return min;
-  return Math.min(max, Math.max(min, Math.round(num)));
+function clampInt(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
 }
 
-function snap16(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return 16;
-  return Math.max(16, Math.round(num / 16) * 16);
-}
-
-function migrateLegacyState(raw) {
-  const next = { ...defaults, ...(raw || {}) };
-  if (raw && raw.size && !raw.sizeMode) {
-    const match = String(raw.size).match(/^(\d+)x(\d+)$/i);
-    if (match) {
-      next.sizeMode = 'custom';
-      next.customWidth = Number(match[1]);
-      next.customHeight = Number(match[2]);
-    }
+function apiPath(path) {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const pathname = window.location.pathname;
+  if (pathname.startsWith('/image.html') || pathname.startsWith('/image-client/')) {
+    return `/image-client-api${cleanPath.replace(/^\/api/, '')}`;
   }
-  next.count = clampInt(next.count, 1, 8);
-  return next;
+  return cleanPath;
 }
 
-function loadState() {
+function getSelectedProtocol() {
+  const selected = els.protocol.value;
+  return PROTOCOL_CONFIG[selected] ? selected : DEFAULT_SETTINGS.protocol;
+}
+
+function getProtocolConfig() {
+  return PROTOCOL_CONFIG[getSelectedProtocol()];
+}
+
+function safePersistableBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...defaults };
-    return migrateLegacyState(JSON.parse(raw));
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return '';
+    return parsed.toString().replace(/\/$/, '');
   } catch {
-    return { ...defaults };
+    return '';
   }
 }
 
-function truncateMiddle(value, max = 34) {
-  if (!value) return 'Base URL 未填写';
-  if (value.length <= max) return value;
-  const left = Math.ceil((max - 1) / 2);
-  const right = Math.floor((max - 1) / 2);
-  return `${value.slice(0, left)}…${value.slice(-right)}`;
+function clearLegacySecrets() {
+  try {
+    for (const key of LEGACY_STORAGE_KEYS) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Storage can be unavailable in sandboxed or privacy-restricted iframes.
+  }
 }
 
-function formatBytes(bytes) {
-  const size = Number(bytes);
-  if (!Number.isFinite(size) || size <= 0) return '0 B';
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 ** 2)).toFixed(1)} MB`;
+function loadSettings() {
+  clearLegacySecrets();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    const protocol = PROTOCOL_CONFIG[parsed.protocol] ? parsed.protocol : DEFAULT_SETTINGS.protocol;
+    const config = PROTOCOL_CONFIG[protocol];
+    const model = config.models.includes(parsed.model) ? parsed.model : config.defaultModel;
+    return {
+      protocol,
+      mode: parsed.mode === 'edit' ? 'edit' : 'generate',
+      baseUrl: safePersistableBaseUrl(parsed.baseUrl),
+      model,
+      size: String(parsed.size || DEFAULT_SETTINGS.size),
+      count: clampInt(parsed.count, 1, config.maxOutputs, DEFAULT_SETTINGS.count),
+      timeout: clampInt(parsed.timeout, 5, 600, DEFAULT_SETTINGS.timeout),
+      videoResolution: ['480p', '720p', '1080p'].includes(parsed.videoResolution)
+        ? parsed.videoResolution
+        : DEFAULT_SETTINGS.videoResolution,
+      duration: clampInt(parsed.duration, 1, 15, DEFAULT_SETTINGS.duration),
+    };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
 }
 
-function formatClock(ms) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+function persistSettings() {
+  const settings = {
+    protocol: getSelectedProtocol(),
+    mode: currentMode,
+    baseUrl: safePersistableBaseUrl(els.base_url.value),
+    model: els.model.value,
+    size: els.size.value,
+    count: clampInt(els.image_count.value, 1, getProtocolConfig().maxOutputs, 1),
+    timeout: clampInt(els.timeout.value, 5, 600, 500),
+    videoResolution: els.video_resolution.value,
+    duration: clampInt(els.duration.value, 1, 15, 10),
+  };
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Settings persistence is optional; generation must remain usable without it.
+  }
+}
+
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
   const seconds = String(totalSeconds % 60).padStart(2, '0');
   return `${minutes}:${seconds}`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 ** 2)).toFixed(1)} MB`;
 }
 
-function formatDateTime(timestamp) {
-  return new Date(timestamp).toLocaleString('zh-CN', {
-    hour12: false,
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-function applyTheme(theme) {
-  const nextTheme = theme === 'dark' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = nextTheme;
-  els.themeToggle.classList.toggle('active', nextTheme === 'dark');
-  els.themeToggle.setAttribute('aria-pressed', String(nextTheme === 'dark'));
-  els.summaryTheme.textContent = nextTheme === 'dark' ? 'DARK 模式' : 'LIGHT 模式';
-}
-
-function getModeLabel(mode) {
-  return mode === 'edit' ? '图生图' : '文生图';
-}
-
-function getEntryModeLabel(entry) {
-  if (entry?.mediaType === 'video' || isVideoEntry(entry)) {
-    return entry.mode === 'edit' ? '图生视频' : '文生视频';
+function formatApiError(data) {
+  if (!data || typeof data !== 'object') return '';
+  const parts = [];
+  const message = data.message || data.error?.message;
+  if (message) parts.push(`错误：${message}`);
+  if (data.last_endpoint) parts.push(`最后请求地址：${data.last_endpoint}`);
+  if (data.client_request_id) parts.push(`客户端请求 ID：${data.client_request_id}`);
+  if (Array.isArray(data.diagnostics) && data.diagnostics.length) {
+    parts.push('尝试过的地址：', ...data.diagnostics);
   }
-  return getModeLabel(entry?.mode);
+  return parts.join('\n');
 }
 
-function isVideoModel(model) {
-  return String(model || '').trim().toLowerCase().startsWith('grok-imagine-video');
+function setHealthStatus(ok) {
+  els['service-status'].textContent = ok ? '● 后端服务在线' : '● 后端连接失败';
+  els['service-status'].classList.toggle('text-emerald-600', ok);
+  els['service-status'].classList.toggle('font-medium', ok);
+  els['service-status'].classList.toggle('text-rose-600', !ok);
 }
 
-function protocolFromModel(model) {
-  const value = String(model || '').trim().toLowerCase();
-  return value.startsWith('grok-imagine')
-    ? 'grok'
-    : 'openai';
-}
-
-function isVideoEntry(entry) {
-  return entry?.mediaType === 'video' || (Array.isArray(entry?.videos) && entry.videos.length > 0);
-}
-
-function getEntryMediaItems(entry) {
-  if (isVideoEntry(entry)) {
-    return Array.isArray(entry.videos)
-      ? entry.videos.map((src, mediaIndex) => ({ entryId: entry.id, type: 'video', src, mediaIndex }))
-      : [];
-  }
-  return Array.isArray(entry.images)
-    ? entry.images.map((src, mediaIndex) => ({ entryId: entry.id, type: 'image', src, mediaIndex }))
-    : [];
-}
-
-function updatePromptPlaceholder(mode) {
-  els.prompt.placeholder = mode === 'edit'
-    ? '请输入你希望在参考图基础上生成的效果，例如：保留主体姿态，改成赛博朋克夜景风格...'
-    : '请输入生图提示词...';
-  els.promptDesc.textContent = mode === 'edit'
-    ? '上传一张参考图，再输入提示词进行图生图。错误信息会在当前页面显示。'
-    : '输入提示词后直接生成图片，错误信息会在当前页面显示。';
-  els.generateBtn.textContent = mode === 'edit' ? '开始图生图' : '生成图片';
-  els.modeBadge.textContent = getModeLabel(mode);
-}
-
-function getPresetSize(baseKey, ratioKey) {
-  const longEdge = baseMap[baseKey] || 1024;
-  const ratio = ratioMap[ratioKey] || [1, 1];
-  const [rw, rh] = ratio;
-  if (rw >= rh) {
-    const width = longEdge;
-    const height = snap16((longEdge * rh) / rw);
-    return `${width}x${height}`;
-  }
-  const height = longEdge;
-  const width = snap16((longEdge * rw) / rh);
-  return `${width}x${height}`;
-}
-
-function getEffectiveSize(state) {
-  if (state.sizeMode === 'custom') {
-    const width = Number(state.customWidth);
-    const height = Number(state.customHeight);
-    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 16 || height < 16) {
-      return { error: '自定义宽高必须是大于等于 16 的数字' };
-    }
-    if (width % 16 !== 0 || height % 16 !== 0) {
-      return { error: '自定义宽高只能填写 16 的倍数' };
-    }
-    return { value: `${width}x${height}` };
-  }
-  return { value: getPresetSize(state.presetBase, state.presetRatio) };
-}
-
-function syncPresetRatioAvailability() {
-  const base = els.presetBase.value;
-  const currentRatio = els.presetRatio.value;
-  Array.from(els.presetRatio.options).forEach((option) => {
-    const restricted = restrictedRatios.has(option.value);
-    const enabled = !restricted || base === '2K';
-    option.disabled = !enabled;
-    option.hidden = false;
-  });
-  if (restrictedRatios.has(currentRatio) && base !== '2K') {
-    els.presetRatio.value = '1:1';
+async function checkHealth() {
+  try {
+    const response = await fetch(apiPath('/api/health'), { cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    setHealthStatus(response.ok && data.ok === true);
+  } catch {
+    setHealthStatus(false);
   }
 }
 
-function updateSizeModeUI(mode) {
-  const preset = mode !== 'custom';
-  els.sizeModePreset.classList.toggle('active', preset);
-  els.sizeModeCustom.classList.toggle('active', !preset);
-  els.presetSizePanel.classList.toggle('hidden', !preset);
-  els.customSizePanel.classList.toggle('hidden', preset);
+function setStatus(text) {
+  els['job-status-desc'].textContent = text;
 }
 
-function defaultModelForMode(mode) {
-  return mode === 'edit' ? DEFAULT_EDIT_MODEL : DEFAULT_GENERATE_MODEL;
+function showError(title, details) {
+  els['diagnostic-panel'].classList.remove('hidden');
+  els['error-message'].textContent = title;
+  els['diagnostic-details'].textContent = details || '无更深入的报错上下文';
 }
 
-function shouldAutoSwitchModel(model) {
-  const value = String(model || '').trim();
-  return !value || MANAGED_DEFAULT_MODELS.has(value);
+function hideError() {
+  els['diagnostic-panel'].classList.add('hidden');
+  els['error-message'].textContent = '';
+  els['diagnostic-details'].textContent = '';
 }
 
-function syncDefaultModelForMode(mode) {
-  if (shouldAutoSwitchModel(els.model.value)) {
-    els.model.value = defaultModelForMode(mode);
+function setLoadingState(isLoading) {
+  els['submit-btn'].disabled = isLoading;
+  els['submit-btn'].classList.toggle('opacity-50', isLoading);
+  els['submit-btn'].classList.toggle('cursor-not-allowed', isLoading);
+  els.loader.classList.toggle('hidden', !isLoading);
+  els['cancel-btn'].classList.toggle('hidden', !isLoading);
+  els['clear-history-btn'].disabled = isLoading;
+  els['clear-history-btn'].classList.toggle('opacity-50', isLoading);
+}
+
+function updateProtocolButtons() {
+  const selected = getSelectedProtocol();
+  for (const button of els['protocol-control'].querySelectorAll('[data-protocol]')) {
+    const active = button.dataset.protocol === selected;
+    button.setAttribute('aria-pressed', String(active));
+    button.className = active
+      ? 'text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition'
+      : 'text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition';
   }
 }
 
-function updateImageModeUI(mode) {
-  const normalizedMode = mode === 'edit' ? 'edit' : 'generate';
-  syncDefaultModelForMode(normalizedMode);
-  const isEdit = normalizedMode === 'edit';
-  els.imageModeGenerate.classList.toggle('active', !isEdit);
-  els.imageModeEdit.classList.toggle('active', isEdit);
-  els.editImagePanel.classList.toggle('hidden', !isEdit);
-  updatePromptPlaceholder(normalizedMode);
-  renderEditImagePreview();
-}
-
-function currentState() {
-  return {
-    baseUrl: els.baseUrl.value.trim(),
-    apiKey: els.apiKey.value.trim(),
-    model: els.model.value.trim(),
-    count: clampInt(els.count.value || 1, 1, 8),
-    timeout: clampInt(els.timeout.value || 120, 10, 600),
-    prompt: els.prompt.value,
-    imageMode: els.imageModeEdit.classList.contains('active') ? 'edit' : 'generate',
-    sizeMode: els.sizeModeCustom.classList.contains('active') ? 'custom' : 'preset',
-    presetBase: els.presetBase.value,
-    presetRatio: els.presetRatio.value,
-    customWidth: Number(els.customWidth.value || 0),
-    customHeight: Number(els.customHeight.value || 0),
-    theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light',
-  };
-}
-
-function updateSummary(state) {
-  const size = getEffectiveSize(state);
-  const sizeText = size.value || size.error || '尺寸未设置';
-  els.statModel.textContent = state.model || defaults.model;
-  els.statSize.textContent = sizeText;
-  els.statCount.textContent = String(clampInt(state.count || defaults.count, 1, 8));
-  els.summaryBaseUrl.textContent = truncateMiddle(state.baseUrl);
-  els.summarySize.textContent = `尺寸 ${sizeText}`;
-  els.summaryTimeout.textContent = `超时 ${clampInt(state.timeout || defaults.timeout, 10, 600)} 秒`;
-  els.resolvedSizeBadge.textContent = sizeText;
-  applyTheme(state.theme);
-}
-
-function saveState(next) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  els.saveState.textContent = `设置已自动保存到浏览器本地 · ${new Date().toLocaleTimeString()}`;
-  updateSummary(next);
-}
-
-function hydrateForm(state) {
-  els.baseUrl.value = state.baseUrl || '';
-  els.apiKey.value = state.apiKey || '';
-  els.model.value = state.model || defaults.model;
-  els.count.value = clampInt(state.count || defaults.count, 1, 8);
-  els.timeout.value = clampInt(state.timeout || defaults.timeout, 10, 600);
-  els.prompt.value = state.prompt || '';
-  updateImageModeUI(state.imageMode || defaults.imageMode);
-  els.presetBase.value = state.presetBase || defaults.presetBase;
-  syncPresetRatioAvailability();
-  els.presetRatio.value = state.presetRatio || defaults.presetRatio;
-  syncPresetRatioAvailability();
-  els.customWidth.value = Number(state.customWidth || defaults.customWidth);
-  els.customHeight.value = Number(state.customHeight || defaults.customHeight);
-  updateSizeModeUI(state.sizeMode || defaults.sizeMode);
-  updateSummary(currentState());
-}
-
-function normalizeCustomInputs() {
-  if (els.customWidth.value) els.customWidth.value = String(snap16(els.customWidth.value));
-  if (els.customHeight.value) els.customHeight.value = String(snap16(els.customHeight.value));
-  saveState(currentState());
-}
-
-function normalizeCountInput() {
-  els.count.value = String(clampInt(els.count.value || 1, 1, 8));
-  saveState(currentState());
-}
-
-function normalizeTimeoutInput() {
-  els.timeout.value = String(clampInt(els.timeout.value || 120, 10, 600));
-  saveState(currentState());
-}
-
-function renderEditImagePreview() {
-  const active = currentState().imageMode === 'edit';
-  els.editImagePreviewCard.classList.toggle('hidden', !editImageState || !active);
-
-  if (!editImageState) {
-    els.editImageDropzone.classList.remove('is-filled');
-    els.editImageMeta.textContent = '尚未选择图片';
-    els.editImagePreview.removeAttribute('src');
-    return;
+function updateModeButtons() {
+  for (const button of els['mode-control'].querySelectorAll('[data-mode]')) {
+    const active = button.dataset.mode === currentMode;
+    button.setAttribute('aria-pressed', String(active));
+    button.className = active
+      ? 'text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition'
+      : 'text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition';
   }
-
-  els.editImageDropzone.classList.add('is-filled');
-  els.editImagePreview.src = editImageState.dataUrl;
-  els.editImagePreview.alt = editImageState.name || 'reference image preview';
-  const parts = [
-    editImageState.name || 'reference-image',
-    editImageState.contentType || 'image/png',
-  ];
-  if (Number.isFinite(editImageState.size)) parts.push(formatBytes(editImageState.size));
-  els.editImageMeta.textContent = parts.join(' · ');
+  els['edit-image-container'].classList.toggle('hidden', currentMode !== 'edit');
 }
 
-function setEditImageState(nextImage) {
-  editImageState = nextImage;
-  renderEditImagePreview();
+function updateModelOptions(config, preferredModel) {
+  const currentValue = preferredModel || els.model.value;
+  els.model.replaceChildren();
+  for (const modelName of config.models) {
+    const option = document.createElement('option');
+    option.value = modelName;
+    option.textContent = modelName;
+    els.model.append(option);
+  }
+  els.model.value = config.models.includes(currentValue) ? currentValue : config.defaultModel;
 }
 
-function clearEditImageState() {
-  setEditImageState(null);
-  els.editImageInput.value = '';
+function applyProtocolPreset(preferredModel) {
+  const config = getProtocolConfig();
+  updateModelOptions(config, preferredModel);
+  updateProtocolButtons();
+  updateModeButtons();
+
+  els['protocol-desc'].textContent = config.description;
+  els['mode-label'].textContent = config.modeLabel;
+  els['mode-generate'].textContent = config.generateLabel;
+  els['mode-edit'].textContent = config.editLabel;
+  els['reference-label'].textContent = config.referenceLabel;
+  els['upload-placeholder'].textContent = config.uploadPlaceholder;
+  els['prompt-label'].textContent = config.promptLabel;
+  els.prompt.placeholder = config.promptPlaceholder;
+  els['size-label'].textContent = config.sizeLabel;
+  els['count-label'].textContent = config.countLabel;
+  els.image_count.max = String(config.maxOutputs);
+  els.image_count.value = String(clampInt(els.image_count.value, 1, config.maxOutputs, 1));
+  els['timeout-label'].textContent = config.timeoutLabel;
+  els['video-options'].classList.toggle('hidden', !config.isVideo);
+  els['submit-btn'].querySelector('span').textContent = config.submitText;
+  els['request-message'].textContent = config.waitingText;
+
+  if (uploadedReferenceImages.length > config.maxReferenceImages) {
+    uploadedReferenceImages = uploadedReferenceImages.slice(0, config.maxReferenceImages);
+    setStatus(`协议已切换，仅保留前 ${config.maxReferenceImages} 张参考图。`);
+  }
+  renderReferenceImages();
+}
+
+function switchProtocol(protocol, preferredModel) {
+  if (!PROTOCOL_CONFIG[protocol] || activeTask) return;
+  els.protocol.value = protocol;
+  applyProtocolPreset(preferredModel);
+  persistSettings();
+}
+
+function switchMode(mode) {
+  if (activeTask) return;
+  currentMode = mode === 'edit' ? 'edit' : 'generate';
+  updateModeButtons();
+  persistSettings();
 }
 
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('读取图片失败，请重新选择文件'));
+    reader.onerror = () => reject(new Error('读取参考图失败，请重新选择'));
     reader.readAsDataURL(file);
   });
 }
 
-async function handleEditImageFile(file) {
-  if (!file) return;
-  const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
-  if (!allowedTypes.has(file.type)) {
-    throw new Error('图生图目前仅支持 PNG / JPG / WEBP');
+async function addReferenceFiles(files) {
+  const accepted = [];
+  const warnings = [];
+  let totalBytes = uploadedReferenceImages.reduce((sum, image) => sum + Number(image.size || 0), 0);
+  for (const file of files) {
+    if (!ALLOWED_REFERENCE_IMAGE_TYPES.has(file.type)) {
+      warnings.push(`${file.name || '未命名文件'}：仅支持 PNG / JPG / WEBP`);
+    } else if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+      warnings.push(`${file.name || '未命名文件'}：单张不能超过 10 MB`);
+    } else if (totalBytes + file.size > MAX_REFERENCE_IMAGES_TOTAL_BYTES) {
+      warnings.push(`${file.name || '未命名文件'}：全部参考图合计不能超过 30 MB`);
+    } else {
+      accepted.push(file);
+      totalBytes += file.size;
+    }
   }
-  if (file.size > 50 * 1024 * 1024) {
-    throw new Error('参考图不能超过 50 MB');
+
+  const maximum = getProtocolConfig().maxReferenceImages;
+  const remaining = Math.max(0, maximum - uploadedReferenceImages.length);
+  if (accepted.length > remaining) {
+    warnings.push(`当前协议最多上传 ${maximum} 张，仅保留本次前 ${remaining} 张`);
   }
 
-  const dataUrl = await readFileAsDataUrl(file);
-  setEditImageState({
-    name: file.name || 'reference-image',
-    contentType: file.type || 'image/png',
-    size: file.size,
-    dataUrl,
-  });
-}
-
-function bindAutosave() {
-  const watchList = [
-    els.baseUrl,
-    els.apiKey,
-    els.model,
-    els.count,
-    els.timeout,
-    els.prompt,
-    els.presetBase,
-    els.presetRatio,
-    els.customWidth,
-    els.customHeight,
-  ];
-
-  ['input', 'change'].forEach((eventName) => {
-    watchList.forEach((el) => {
-      el.addEventListener(eventName, () => saveState(currentState()));
+  for (const file of accepted.slice(0, remaining)) {
+    uploadedReferenceImages.push({
+      name: file.name || 'reference-image',
+      content_type: file.type || 'image/png',
+      size: file.size,
+      data_url: await readFileAsDataUrl(file),
     });
-  });
-
-  [els.customWidth, els.customHeight].forEach((el) => {
-    el.addEventListener('blur', normalizeCustomInputs);
-  });
-  els.count.addEventListener('blur', normalizeCountInput);
-  els.timeout.addEventListener('blur', normalizeTimeoutInput);
-  els.presetBase.addEventListener('change', () => {
-    syncPresetRatioAvailability();
-    saveState(currentState());
-  });
+  }
+  renderReferenceImages();
+  if (warnings.length) showError('部分参考图未添加', warnings.join('\n'));
 }
 
-function setStatus(kind, text) {
-  const classMap = {
-    idle: 'status-queued',
-    loading: 'status-running',
-    success: 'status-completed',
-    warning: 'status-warning',
-    error: 'status-danger',
+function removeReferenceImage(index) {
+  uploadedReferenceImages.splice(index, 1);
+  renderReferenceImages();
+}
+
+function clearReferenceImages() {
+  uploadedReferenceImages = [];
+  els['file-input'].value = '';
+  renderReferenceImages();
+}
+
+function createReferenceCard(reference, index) {
+  const card = document.createElement('div');
+  card.className = 'relative aspect-square overflow-hidden rounded border border-slate-200 bg-slate-100 shadow-sm';
+  card.title = `${reference.name} · ${formatBytes(reference.size)}`;
+
+  const preview = document.createElement('button');
+  preview.type = 'button';
+  preview.className = 'absolute inset-0 z-10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-slate-500';
+  preview.setAttribute('aria-label', `预览参考图 ${index + 1}`);
+  preview.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openLightbox('image', reference.data_url, `参考图 #${index + 1}`);
+  });
+
+  const image = document.createElement('img');
+  image.src = reference.data_url;
+  image.alt = reference.name || `参考图 ${index + 1}`;
+  image.className = 'h-full w-full object-cover';
+
+  const badge = document.createElement('span');
+  badge.className = 'absolute left-1 top-1 z-20 rounded bg-white/90 px-1.5 py-0.5 text-[10px] text-slate-700 shadow';
+  badge.textContent = `#${index + 1}`;
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'absolute right-1 top-1 z-20 rounded bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-white hover:bg-rose-600 transition';
+  remove.textContent = '移除';
+  remove.setAttribute('aria-label', `移除参考图 ${index + 1}`);
+  remove.addEventListener('click', (event) => {
+    event.stopPropagation();
+    removeReferenceImage(index);
+  });
+
+  card.append(preview, image, badge, remove);
+  return card;
+}
+
+function renderReferenceImages() {
+  const hasImages = uploadedReferenceImages.length > 0;
+  const maximum = getProtocolConfig().maxReferenceImages;
+  els['upload-placeholder'].classList.toggle('hidden', hasImages);
+  els['upload-preview-grid'].classList.toggle('hidden', !hasImages);
+  els['clear-upload-btn'].classList.toggle('hidden', !hasImages);
+  els['upload-count'].textContent = hasImages
+    ? `已选择 ${uploadedReferenceImages.length} / ${maximum} 张参考图`
+    : '尚未选择图片';
+  els['upload-preview-grid'].replaceChildren(
+    ...uploadedReferenceImages.map((reference, index) => createReferenceCard(reference, index)),
+  );
+}
+
+function startTaskTimer(entry) {
+  stopTaskTimer();
+  const tick = () => {
+    entry.elapsedMs = Date.now() - entry.startedAt;
+    const elapsedText = formatElapsed(entry.elapsedMs);
+    els['request-elapsed'].textContent = elapsedText;
+    els['meta-wait'].textContent = elapsedText;
+    const historyElapsed = els['history-list'].querySelector(`[data-entry-id="${entry.id}"] [data-entry-elapsed]`);
+    if (historyElapsed) historyElapsed.textContent = elapsedText;
   };
-  els.statusBadge.className = `status-badge ${classMap[kind] || 'status-queued'}`;
-  els.statusBadge.textContent = text;
+  tick();
+  taskTimerId = window.setInterval(tick, 1000);
 }
 
-function updateLightboxControls() {
-  const total = previewImages.length;
-  const hasMultiple = total > 1;
-  els.lightboxCounter.textContent = total ? `${previewIndex + 1} / ${total}` : '0 / 0';
-  els.lightboxPrev.disabled = !hasMultiple;
-  els.lightboxNext.disabled = !hasMultiple;
-}
-
-function renderLightbox() {
-  if (!previewImages.length) return;
-  els.lightboxImage.src = previewImages[previewIndex];
-  els.lightboxImage.alt = `preview image ${previewIndex + 1}`;
-  updateLightboxControls();
-}
-
-function openLightbox(images, index) {
-  if (!images.length) return;
-  previewImages = [...images];
-  previewIndex = index;
-  renderLightbox();
-  els.lightbox.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeLightbox() {
-  els.lightbox.classList.add('hidden');
-  document.body.style.overflow = '';
-}
-
-function moveLightbox(step) {
-  if (previewImages.length <= 1) return;
-  previewIndex = (previewIndex + step + previewImages.length) % previewImages.length;
-  renderLightbox();
-}
-
-function showError(message) {
-  els.errorBox.textContent = message;
-  els.errorBox.classList.remove('hidden');
-}
-
-function clearError() {
-  els.errorBox.textContent = '';
-  els.errorBox.classList.add('hidden');
-}
-
-function renderEmptyHistory(message = '填写连接设置与提示词后，点击“生成图片”。') {
-  els.gallery.innerHTML = `
-    <div class="empty-state">
-      <div class="empty-state-badge">READY</div>
-      <div class="empty-title">还没有生成结果</div>
-      <div class="empty-desc">${message}</div>
-    </div>
-  `;
-  els.gallery.classList.add('empty');
-}
-
-function getPendingMeta(entry) {
-  return `模式：${getEntryModeLabel(entry)} · 模型：${entry.model} · 尺寸：${entry.size} · 当前任务：${entry.sequence}/${entry.total} · 已等待 ${formatClock(entry.elapsedMs || 0)}`;
-}
-
-function getSuccessMeta(entry) {
-  const parts = [
-    `模式：${getEntryModeLabel(entry)}`,
-    `完成时间：${formatDateTime(entry.createdAt)}`,
-    `模型：${entry.model}`,
-    `尺寸：${entry.size}`,
-    `任务：${entry.sequence}/${entry.total}`,
-  ];
-  if (Number.isFinite(entry.durationMs)) {
-    parts.push(`耗时：${formatClock(entry.durationMs)}`);
+function stopTaskTimer() {
+  if (taskTimerId !== null) {
+    window.clearInterval(taskTimerId);
+    taskTimerId = null;
   }
-  if (entry.endpoint) {
-    parts.push(`接口：${entry.endpoint}`);
+}
+
+function statusPresentation(status) {
+  if (status === 'success') return { text: '已完成', classes: 'bg-emerald-100 text-emerald-700' };
+  if (status === 'error') return { text: '失败', classes: 'bg-rose-100 text-rose-700' };
+  if (status === 'cancelled') return { text: '已取消', classes: 'bg-slate-200 text-slate-600' };
+  if (status === 'queued') return { text: '排队中', classes: 'bg-amber-100 text-amber-700' };
+  return { text: '处理中', classes: 'bg-sky-100 text-sky-700' };
+}
+
+function mediaExtension(source, type) {
+  const match = String(source).match(/^data:image\/([a-z0-9.+-]+);/i);
+  if (match) return match[1] === 'jpeg' ? 'jpg' : match[1].replace('svg+xml', 'svg');
+  try {
+    const pathname = new URL(String(source), window.location.href).pathname;
+    const extension = pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase();
+    if (type === 'video' && ['mp4', 'webm'].includes(extension)) return extension;
+    if (type === 'image' && ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extension)) {
+      return extension === 'jpeg' ? 'jpg' : extension;
+    }
+  } catch {
+    // Fall through to a media-appropriate default.
   }
-  return parts.join(' · ');
+  return type === 'video' ? 'mp4' : 'png';
 }
 
-function getErrorMeta(entry) {
-  const parts = [
-    `模式：${getEntryModeLabel(entry)}`,
-    `失败时间：${formatDateTime(entry.createdAt)}`,
-    `模型：${entry.model}`,
-    `尺寸：${entry.size}`,
-    `任务：${entry.sequence}/${entry.total}`,
-  ];
-  if (Number.isFinite(entry.durationMs)) {
-    parts.push(`等待：${formatClock(entry.durationMs)}`);
-  }
-  return parts.join(' · ');
-}
+function createMediaCard(source, type, index, entry) {
+  const wrapper = document.createElement('div');
+  wrapper.className = type === 'video'
+    ? 'relative border border-slate-200 rounded-lg overflow-hidden bg-slate-950 aspect-video'
+    : 'relative border border-slate-200 rounded-lg overflow-hidden bg-slate-100 aspect-square';
 
-function getEntryMeta(entry) {
-  if (entry.status === 'pending') return getPendingMeta(entry);
-  if (entry.status === 'success') return getSuccessMeta(entry);
-  return getErrorMeta(entry);
-}
-
-function getEntryStatusConfig(entry) {
-  if (entry.status === 'pending') {
-    return {
-      badgeClass: 'status-running',
-      badgeText: `等待 ${formatClock(entry.elapsedMs || 0)}`,
-      chipClass: 'image-chip-running',
-      chipText: '生成中',
-    };
-  }
-  if (entry.status === 'success') {
-    return {
-      badgeClass: 'status-completed',
-      badgeText: '已完成',
-      chipClass: 'image-chip-success',
-      chipText: '已完成',
-    };
-  }
-  return {
-    badgeClass: 'status-danger',
-    badgeText: '失败',
-    chipClass: 'image-chip-error',
-    chipText: '失败',
-  };
-}
-
-function getEntryPlaceholderText(entry) {
-  if (entry.status === 'pending') return '生成中';
-  if (entry.status === 'error') return '生成失败';
-  return '没有返回媒体';
-}
-
-function findEntryOrderById(id) {
-  const index = historyEntries.findIndex((entry) => entry.id === id);
-  return index >= 0 ? index + 1 : 0;
-}
-
-function ensureSelectedHistoryId() {
-  if (selectedHistoryId && historyEntries.some((entry) => entry.id === selectedHistoryId)) return;
-  selectedHistoryId = null;
-}
-
-function getPreviewGalleryItems() {
-  return historyEntries.flatMap((entry) => getEntryMediaItems(entry));
-}
-
-function openEntryPreview(entry) {
-  const entryItems = getEntryMediaItems(entry);
-  if (!entryItems.length) return;
-  if (entryItems[0].type === 'video') {
-    window.open(entryItems[0].src, '_blank', 'noopener');
-    return;
-  }
-  const previewItems = getPreviewGalleryItems().filter((item) => item.type === 'image');
-  const previewIndex = previewItems.findIndex((item) => item.entryId === entry.id);
-  if (previewIndex >= 0) {
-    openLightbox(previewItems.map((item) => item.src), previewIndex);
-    return;
-  }
-  openLightbox(entryItems.map((item) => item.src), 0);
-}
-
-function createImageCard(entry, order) {
-  const node = els.imageCardTemplate.content.firstElementChild.cloneNode(true);
-  const img = node.querySelector('img');
-  const indexNode = node.querySelector('.image-index');
-  const chip = node.querySelector('.image-chip');
-  const placeholder = node.querySelector('.image-placeholder');
-  const status = getEntryStatusConfig(entry);
-  const mediaItems = getEntryMediaItems(entry);
-  const primaryMedia = mediaItems[0] || null;
-
-  node.dataset.entryId = entry.id;
-  node.classList.toggle('is-selected', entry.id === selectedHistoryId);
-  node.addEventListener('click', () => {
-    selectedHistoryId = entry.id;
-    renderHistory();
-  });
-
-  indexNode.textContent = `#${order}`;
-  chip.textContent = status.chipText;
-  chip.className = `image-chip ${status.chipClass}`;
-
-  if (primaryMedia?.type === 'image') {
-    img.src = primaryMedia.src;
-    img.alt = `generated image ${order}`;
-    placeholder.classList.add('hidden');
-  } else if (primaryMedia?.type === 'video') {
-    const video = document.createElement('video');
-    video.className = 'image-card-video';
-    video.src = primaryMedia.src;
-    video.muted = true;
-    video.loop = true;
-    video.playsInline = true;
-    video.preload = 'metadata';
-    img.replaceWith(video);
-    placeholder.classList.add('hidden');
+  const media = document.createElement(type === 'video' ? 'video' : 'img');
+  media.src = source;
+  media.className = type === 'video' ? 'w-full h-full object-contain bg-slate-950' : 'w-full h-full object-cover';
+  if (type === 'video') {
+    media.controls = true;
+    media.preload = 'metadata';
+    media.playsInline = true;
   } else {
-    img.removeAttribute('src');
-    img.alt = getEntryPlaceholderText(entry);
-    img.classList.add('hidden');
-    placeholder.classList.remove('hidden');
-    placeholder.textContent = getEntryPlaceholderText(entry);
-    placeholder.classList.toggle('is-error', entry.status === 'error');
-  }
-
-  return node;
-}
-
-function createDetailLabel(text) {
-  const label = document.createElement('div');
-  label.className = 'history-detail-label';
-  label.textContent = text;
-  return label;
-}
-
-function renderHistoryDetail(container, entry, order) {
-  container.innerHTML = '';
-
-  if (!entry) {
-    const empty = document.createElement('div');
-    empty.className = 'history-detail-empty';
-    empty.textContent = '点击左侧图片后，这里会显示详细信息和提示词。';
-    container.appendChild(empty);
-    return;
-  }
-
-  const status = getEntryStatusConfig(entry);
-  const card = document.createElement('article');
-  card.className = 'history-detail-card';
-  const mediaItems = getEntryMediaItems(entry);
-  const primaryMedia = mediaItems[0] || null;
-
-  const preview = document.createElement(primaryMedia ? 'button' : 'div');
-  preview.className = 'history-detail-preview';
-  if (preview instanceof HTMLButtonElement) {
-    preview.type = 'button';
-    preview.addEventListener('click', () => openEntryPreview(entry));
-  }
-
-  if (primaryMedia?.type === 'image') {
-    const img = document.createElement('img');
-    img.className = 'history-detail-image';
-    img.src = primaryMedia.src;
-    img.alt = `generated image ${order}`;
-    preview.appendChild(img);
-  } else if (primaryMedia?.type === 'video') {
-    const video = document.createElement('video');
-    video.className = 'history-detail-video';
-    video.src = primaryMedia.src;
-    video.controls = true;
-    video.playsInline = true;
-    video.preload = 'metadata';
-    preview.appendChild(video);
-  } else {
-    const placeholder = document.createElement('div');
-    placeholder.className = 'history-detail-placeholder';
-    if (entry.status === 'error') placeholder.classList.add('is-error');
-    placeholder.textContent = getEntryPlaceholderText(entry);
-    preview.appendChild(placeholder);
-  }
-
-  const tagRow = document.createElement('div');
-  tagRow.className = 'history-detail-tags';
-
-  const orderTag = document.createElement('div');
-  orderTag.className = 'mini-tag mini-tag-blue';
-  orderTag.textContent = `序号 #${order}`;
-  tagRow.appendChild(orderTag);
-
-  const modeTag = document.createElement('div');
-  modeTag.className = 'mini-tag mini-tag-white';
-  modeTag.textContent = getEntryModeLabel(entry);
-  tagRow.appendChild(modeTag);
-
-  const statusBadge = document.createElement('div');
-  statusBadge.className = `status-badge ${status.badgeClass}`;
-  statusBadge.textContent = status.badgeText;
-  tagRow.appendChild(statusBadge);
-
-  const metaBlock = document.createElement('div');
-  metaBlock.className = 'history-detail-meta';
-  metaBlock.appendChild(createDetailLabel('详细信息'));
-  const metaContent = document.createElement('div');
-  metaContent.className = 'history-detail-text';
-  metaContent.textContent = getEntryMeta(entry);
-  metaBlock.appendChild(metaContent);
-
-  const promptBlock = document.createElement('div');
-  promptBlock.className = 'history-detail-prompt';
-  promptBlock.appendChild(createDetailLabel('提示词'));
-  const promptContent = document.createElement('div');
-  promptContent.className = 'history-detail-text';
-  promptContent.textContent = entry.prompt || '未填写提示词';
-  promptBlock.appendChild(promptContent);
-
-  let referenceBlock = null;
-  if (entry.sourceImageDataUrl) {
-    referenceBlock = document.createElement('div');
-    referenceBlock.className = 'history-detail-reference';
-    referenceBlock.appendChild(createDetailLabel('参考图'));
-
-    const referencePreview = document.createElement('button');
-    referencePreview.className = 'history-detail-reference-preview';
-    referencePreview.type = 'button';
-    referencePreview.addEventListener('click', () => openLightbox([entry.sourceImageDataUrl], 0));
-
-    const referenceImage = document.createElement('img');
-    referenceImage.className = 'history-detail-reference-image';
-    referenceImage.src = entry.sourceImageDataUrl;
-    referenceImage.alt = entry.sourceImageName || 'reference image';
-    referencePreview.appendChild(referenceImage);
-    referenceBlock.appendChild(referencePreview);
-
-    const referenceMeta = document.createElement('div');
-    referenceMeta.className = 'history-detail-text';
-    referenceMeta.textContent = entry.sourceImageName
-      ? `参考图：${entry.sourceImageName}`
-      : '已上传参考图';
-    referenceBlock.appendChild(referenceMeta);
+    media.alt = `生成图像 ${index + 1}`;
+    media.referrerPolicy = 'no-referrer';
   }
 
   const actions = document.createElement('div');
-  actions.className = 'history-detail-actions';
+  actions.className = 'absolute inset-x-0 bottom-0 z-20 bg-slate-900/60 text-white text-xs px-3 py-2 flex items-center justify-between gap-2';
 
-  if (primaryMedia) {
-    const previewBtn = document.createElement('button');
-    previewBtn.className = 'btn btn-white neo-interactive btn-sm';
-    previewBtn.type = 'button';
-    previewBtn.textContent = primaryMedia.type === 'video' ? '打开视频' : '放大预览';
-    previewBtn.addEventListener('click', () => openEntryPreview(entry));
-    actions.appendChild(previewBtn);
+  const preview = document.createElement('button');
+  preview.type = 'button';
+  preview.className = 'truncate text-left hover:underline focus:outline-none focus:ring-2 focus:ring-white';
+  preview.textContent = type === 'video' ? `预览视频 #${index + 1}` : `预览图像 #${index + 1}`;
+  preview.addEventListener('click', () => openLightbox(type, source, `${type === 'video' ? '视频' : '图像'} #${index + 1}`));
 
-    const downloadLink = document.createElement('a');
-    downloadLink.className = 'btn btn-green neo-interactive btn-sm download-link';
-    downloadLink.href = primaryMedia.src;
-    downloadLink.download = primaryMedia.type === 'video'
-      ? `generated-${entry.createdAt || Date.now()}-${order}.mp4`
-      : `generated-${entry.createdAt || Date.now()}-${order}.png`;
-    downloadLink.textContent = primaryMedia.type === 'video' ? '下载视频' : '下载图片';
-    actions.appendChild(downloadLink);
+  const download = document.createElement('a');
+  download.className = 'bg-white/90 hover:bg-white text-slate-800 text-xs px-2.5 py-1 rounded shadow font-medium transition shrink-0';
+  download.href = source;
+  download.download = `${type}_${entry.createdAt}_${index + 1}.${mediaExtension(source, type)}`;
+  download.textContent = '下载';
+
+  actions.append(preview, download);
+  wrapper.append(media, actions);
+  return wrapper;
+}
+
+function createHistoryEntry(entry) {
+  const article = document.createElement('article');
+  article.dataset.entryId = entry.id;
+  article.className = 'border border-slate-200 rounded-lg bg-white p-4 shadow-sm animate-fade-in';
+
+  const header = document.createElement('div');
+  header.className = 'flex items-start justify-between gap-3';
+  const summary = document.createElement('div');
+  summary.className = 'min-w-0';
+  const title = document.createElement('h3');
+  title.className = 'text-sm font-semibold text-slate-800';
+  title.textContent = `${PROTOCOL_CONFIG[entry.protocol].isVideo ? '视频' : '图像'}任务 · ${entry.mode === 'edit' ? '参考图模式' : '生成模式'}`;
+  const metadata = document.createElement('p');
+  metadata.className = 'mt-1 text-[11px] text-slate-400 break-all';
+  metadata.append(`${[entry.model, entry.size, `n=${entry.count}`].filter(Boolean).join(' · ')} · `);
+  const elapsed = document.createElement('span');
+  elapsed.dataset.entryElapsed = '';
+  elapsed.textContent = formatElapsed(entry.elapsedMs || 0);
+  metadata.append(elapsed);
+  if (entry.jobId) metadata.append(` · Task ${entry.jobId}`);
+  summary.append(title, metadata);
+
+  const presentation = statusPresentation(entry.status);
+  const status = document.createElement('span');
+  status.className = `shrink-0 rounded px-2 py-1 text-[11px] font-semibold ${presentation.classes}`;
+  status.textContent = presentation.text;
+  header.append(summary, status);
+
+  const prompt = document.createElement('p');
+  prompt.className = 'mt-3 text-xs text-slate-600 whitespace-pre-wrap break-words';
+  prompt.textContent = entry.prompt;
+  article.append(header, prompt);
+
+  if (entry.status === 'queued' || entry.status === 'running') {
+    const pending = document.createElement('div');
+    pending.className = 'mt-4 border border-dashed border-sky-200 bg-sky-50/50 rounded-lg min-h-28 flex items-center justify-center text-xs text-sky-700';
+    pending.textContent = '异步任务处理中，结果会自动更新';
+    article.append(pending);
+  } else if (entry.status === 'error' || entry.status === 'cancelled') {
+    const message = document.createElement('pre');
+    message.className = entry.status === 'error'
+      ? 'mt-4 whitespace-pre-wrap text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded p-3'
+      : 'mt-4 whitespace-pre-wrap text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded p-3';
+    message.textContent = entry.errorMessage || (entry.status === 'cancelled' ? '任务已取消。' : '任务失败。');
+    article.append(message);
+  } else {
+    const mediaItems = [
+      ...entry.images.map((source) => ({ source, type: 'image' })),
+      ...entry.videos.map((source) => ({ source, type: 'video' })),
+    ];
+    const grid = document.createElement('div');
+    grid.className = 'mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3';
+    if (mediaItems.length) {
+      mediaItems.forEach((item, index) => grid.append(createMediaCard(item.source, item.type, index, entry)));
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'col-span-full text-xs text-slate-500 border border-dashed border-slate-200 rounded-lg p-6 text-center';
+      empty.textContent = '任务完成，但接口没有返回媒体。';
+      grid.append(empty);
+    }
+    article.append(grid);
   }
-
-  if (entry.status === 'error' && entry.errorMessage) {
-    const errorBlock = document.createElement('div');
-    errorBlock.className = 'history-detail-error';
-    errorBlock.appendChild(createDetailLabel('错误信息'));
-    const errorText = document.createElement('div');
-    errorText.className = 'history-detail-text';
-    errorText.textContent = entry.errorMessage;
-    errorBlock.appendChild(errorText);
-    card.appendChild(preview);
-    card.appendChild(tagRow);
-    card.appendChild(metaBlock);
-    card.appendChild(promptBlock);
-    if (referenceBlock) card.appendChild(referenceBlock);
-    card.appendChild(errorBlock);
-    if (actions.childNodes.length) card.appendChild(actions);
-    container.appendChild(card);
-    return;
-  }
-
-  card.appendChild(preview);
-  card.appendChild(tagRow);
-  card.appendChild(metaBlock);
-  card.appendChild(promptBlock);
-  if (referenceBlock) card.appendChild(referenceBlock);
-  if (actions.childNodes.length) card.appendChild(actions);
-  container.appendChild(card);
+  return article;
 }
 
 function renderHistory() {
   if (!historyEntries.length) {
-    selectedHistoryId = null;
-    renderEmptyHistory();
+    const empty = document.createElement('div');
+    empty.id = 'history-empty';
+    empty.className = 'border border-dashed border-slate-200 rounded-lg min-h-48 flex flex-col items-center justify-center text-slate-400 bg-slate-50/30';
+    empty.textContent = '暂无任务记录';
+    els['history-list'].replaceChildren(empty);
+    return;
+  }
+  els['history-list'].replaceChildren(...historyEntries.map(createHistoryEntry));
+}
+
+function updateGlobalMeta(entry) {
+  els['meta-panel'].classList.remove('hidden');
+  els['meta-req-id'].textContent = entry.jobId || entry.id;
+  els['meta-duration'].textContent = Number.isFinite(entry.durationMs) ? `${entry.durationMs} ms` : '处理中';
+  els['meta-wait'].textContent = formatElapsed(entry.elapsedMs || 0);
+  els['meta-endpoint'].textContent = entry.endpoint || '等待上游响应';
+  els['meta-status'].textContent = statusPresentation(entry.status).text;
+}
+
+function createPayload() {
+  const config = getProtocolConfig();
+  const count = clampInt(els.image_count.value, 1, config.maxOutputs, 1);
+  const timeout = clampInt(els.timeout.value, 5, 600, 500);
+  const payload = {
+    mode: currentMode,
+    base_url: els.base_url.value.trim(),
+    api_key: els.api_key.value.trim(),
+    protocol: config.backendProtocol,
+    prompt: els.prompt.value.trim(),
+    model: els.model.value,
+    size: els.size.value,
+    n: count,
+    timeout,
+  };
+
+  if (config.isVideo) {
+    payload.video_resolution = els.video_resolution.value || '720p';
+    payload.duration = clampInt(els.duration.value, 1, 15, 10);
+    payload.poll_interval = 5;
+  }
+  if (currentMode === 'edit') {
+    payload.edit_images = uploadedReferenceImages.map(({ name, content_type, data_url }) => ({
+      name,
+      content_type,
+      data_url,
+    }));
+  }
+  return payload;
+}
+
+function validatePayload(payload) {
+  if (!payload.base_url) return '请先填写 Base URL';
+  if (!payload.api_key) return '请先填写 API Key';
+  if (!payload.prompt) return '请输入提示词';
+  if (payload.mode === 'edit' && payload.edit_images.length === 0) return '请先上传至少一张参考图';
+  if (payload.mode === 'edit' && payload.edit_images.length > getProtocolConfig().maxReferenceImages) {
+    return `当前协议最多上传 ${getProtocolConfig().maxReferenceImages} 张参考图`;
+  }
+  return '';
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, { cache: 'no-store', ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    const error = new Error(formatApiError(data) || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.payload = data;
+    throw error;
+  }
+  return data;
+}
+
+function abortableDelay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = window.setTimeout(resolve, milliseconds);
+    signal.addEventListener('abort', () => {
+      window.clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
+async function pollJob(task, timeoutSeconds) {
+  const deadline = Date.now() + ((timeoutSeconds + 30) * 1000);
+  while (Date.now() < deadline) {
+    await abortableDelay(POLL_INTERVAL_MS, task.controller.signal);
+    const job = await fetchJson(apiPath(`/api/jobs/${encodeURIComponent(task.jobId)}`), {
+      signal: task.controller.signal,
+    });
+    const status = String(job.status || '').toLowerCase();
+    if (status === 'success') return job.result || {};
+    if (status === 'error' || status === 'failed') {
+      throw new Error(formatApiError(job.error || job) || '异步任务执行失败');
+    }
+    if (status === 'cancelled' || status === 'canceled') {
+      throw new DOMException('Cancelled', 'AbortError');
+    }
+    task.entry.status = status === 'queued' ? 'queued' : 'running';
+    updateGlobalMeta(task.entry);
+    setStatus(task.entry.status === 'queued' ? '任务已创建，正在排队...' : '任务正在执行，等待媒体结果...');
+  }
+  throw new Error(`等待任务超过 ${timeoutSeconds + 30} 秒，已停止轮询`);
+}
+
+async function requestServerCancellation(jobId) {
+  if (!jobId) return false;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 3000);
+  try {
+    const response = await fetch(apiPath(`/api/jobs/${encodeURIComponent(jobId)}`), {
+      method: 'DELETE',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    const status = String(data.status || '').toLowerCase();
+    return response.ok && (data.cancel_requested === true || ['cancelled', 'canceled'].includes(status));
+  } catch {
+    return false;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function cancelActiveTask() {
+  const task = activeTask;
+  if (!task || task.cancelRequested) return;
+  task.cancelRequested = true;
+  task.entry.status = 'cancelled';
+  task.entry.elapsedMs = Date.now() - task.entry.startedAt;
+  task.controller.abort();
+  els['cancel-btn'].disabled = true;
+  els['cancel-btn'].textContent = '正在取消...';
+  const serverCancelled = await requestServerCancellation(task.jobId);
+  task.entry.errorMessage = serverCancelled
+    ? '任务已在服务端取消。'
+    : '已停止本地等待；服务端未确认取消，任务可能仍在后台运行。';
+  renderHistory();
+  if (activeTask === task || activeTask === null) {
+    updateGlobalMeta(task.entry);
+    setStatus(task.entry.errorMessage);
+  }
+}
+
+async function submitGeneration(event) {
+  event.preventDefault();
+  if (activeTask) return;
+  hideError();
+  persistSettings();
+  const payload = createPayload();
+  const validationError = validatePayload(payload);
+  if (validationError) {
+    showError('无法提交任务', validationError);
+    setStatus(validationError);
     return;
   }
 
-  ensureSelectedHistoryId();
-  els.gallery.innerHTML = '';
-  els.gallery.classList.remove('empty');
-
-  const board = els.historyBoardTemplate.content.firstElementChild.cloneNode(true);
-  const list = board.querySelector('.history-board-list');
-  const detail = board.querySelector('.history-detail');
-  const count = board.querySelector('.history-board-count');
-  count.textContent = `${historyEntries.length} 个结果`;
-
-  historyEntries.forEach((entry, index) => {
-    list.appendChild(createImageCard(entry, index + 1));
-  });
-
-  const selectedEntry = selectedHistoryId
-    ? historyEntries.find((entry) => entry.id === selectedHistoryId) || null
-    : null;
-  renderHistoryDetail(detail, selectedEntry, selectedEntry ? findEntryOrderById(selectedEntry.id) : 0);
-
-  els.gallery.appendChild(board);
-}
-
-function stopRequestTimer() {
-  if (activeTimerId) {
-    clearInterval(activeTimerId);
-    activeTimerId = null;
-  }
-  activePendingId = null;
-}
-
-function findEntryById(id) {
-  return historyEntries.find((entry) => entry.id === id) || null;
-}
-
-function updatePendingEntryUI(entry) {
-  if (selectedHistoryId !== entry.id) return;
-  const detail = els.gallery.querySelector('.history-detail');
-  if (!detail) return;
-  renderHistoryDetail(detail, entry, findEntryOrderById(entry.id));
-}
-
-function startRequestTimer(entry) {
-  stopRequestTimer();
-  activePendingId = entry.id;
-
-  const tick = () => {
-    const activeEntry = findEntryById(activePendingId);
-    if (!activeEntry) {
-      stopRequestTimer();
-      return;
-    }
-    activeEntry.elapsedMs = Date.now() - activeEntry.startedAt;
-    const taskLabel = activeEntry.total > 1
-      ? `串行 ${activeEntry.sequence}/${activeEntry.total}`
-      : '生成中';
-    setStatus('loading', `${taskLabel} ${formatClock(activeEntry.elapsedMs)}`);
-    els.metaInfo.textContent = `当前任务 ${activeEntry.sequence}/${activeEntry.total} · 已等待 ${formatClock(activeEntry.elapsedMs)}`;
-    updatePendingEntryUI(activeEntry);
-  };
-
-  tick();
-  activeTimerId = setInterval(tick, 1000);
-}
-
-function formatError(data) {
-  const parts = [];
-  if (data.message) parts.push(`错误：${data.message}`);
-  if (data.last_endpoint) parts.push(`最后请求地址：${data.last_endpoint}`);
-  if (data.client_request_id) parts.push(`客户端请求 ID：${data.client_request_id}`);
-  if (Array.isArray(data.diagnostics) && data.diagnostics.length) {
-    parts.push('尝试过的地址：');
-    parts.push(...data.diagnostics);
-  }
-  return parts.join('\n');
-}
-
-async function runSingleGenerateTask(state, sizeValue, sequence, total) {
   const entry = {
-    id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    status: 'pending',
-    mode: state.imageMode || 'generate',
-    prompt: state.prompt.trim(),
-    model: state.model || defaults.model,
-    size: sizeValue,
-    total,
-    sequence,
-    createdAt: Date.now(),
+    id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    jobId: '',
+    status: 'queued',
     startedAt: Date.now(),
+    createdAt: Date.now(),
     elapsedMs: 0,
-    mediaType: isVideoModel(state.model) ? 'video' : 'image',
+    durationMs: null,
+    endpoint: '',
+    protocol: getSelectedProtocol(),
+    mode: currentMode,
+    model: payload.model,
+    size: payload.size,
+    count: payload.n,
+    prompt: payload.prompt,
     images: [],
     videos: [],
     errorMessage: '',
-    sourceImageDataUrl: state.imageMode === 'edit' ? (editImageState?.dataUrl || '') : '',
-    sourceImageName: state.imageMode === 'edit' ? (editImageState?.name || '') : '',
   };
-
-  historyEntries = [...historyEntries, entry];
+  historyEntries = [entry, ...historyEntries].slice(0, HISTORY_LIMIT);
+  const task = { entry, controller: new AbortController(), jobId: '', cancelRequested: false };
+  activeTask = task;
+  setLoadingState(true);
+  els['request-hint'].classList.remove('hidden');
+  els['request-message'].textContent = getProtocolConfig().waitingText;
+  updateGlobalMeta(entry);
   renderHistory();
-  startRequestTimer(entry);
+  startTaskTimer(entry);
+  setStatus('正在创建异步任务...');
 
   try {
-    const requestPayload = {
-      base_url: state.baseUrl,
-      api_key: state.apiKey,
-      prompt: state.prompt,
-      model: state.model,
-      protocol: protocolFromModel(state.model),
-      size: sizeValue,
-      n: 1,
-      timeout: state.timeout,
-      mode: state.imageMode || 'generate',
-    };
-    if (isVideoModel(state.model)) {
-      requestPayload.video_resolution = '720p';
-      requestPayload.duration = 10;
-      requestPayload.poll_interval = 5;
-    }
-    if (requestPayload.mode === 'edit' && editImageState) {
-      requestPayload.edit_image = {
-        name: editImageState.name,
-        content_type: editImageState.contentType,
-        data_url: editImageState.dataUrl,
-      };
-    }
-
-    const response = await fetch('/api/generate-async', {
+    const created = await fetchJson(apiPath('/api/generate-async'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestPayload),
-      cache: 'no-store',
+      body: JSON.stringify(payload),
+      signal: task.controller.signal,
     });
-
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) {
-      throw new Error(formatError(data));
-    }
-
-    const jobId = String(data.job_id || '').trim();
-    if (!jobId) {
-      throw new Error('服务未返回任务 ID');
-    }
-    entry.jobId = jobId;
-
-    let finalData = null;
-    while (true) {
-      await sleep(2000);
-      const pollResponse = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
-        cache: 'no-store',
-      });
-      const pollData = await pollResponse.json().catch(() => ({}));
-      if (!pollResponse.ok || !pollData.ok) {
-        throw new Error(formatError(pollData));
-      }
-      if (pollData.status === 'success') {
-        finalData = pollData.result || {};
-        break;
-      }
-      if (pollData.status === 'error') {
-        throw new Error(formatError(pollData.error || pollData));
-      }
-    }
-
-    entry.elapsedMs = Date.now() - entry.startedAt;
-    stopRequestTimer();
-    entry.status = 'success';
-    entry.mediaType = finalData.media_type || (Array.isArray(finalData.videos) && finalData.videos.length ? 'video' : 'image');
-    entry.images = Array.isArray(finalData.images) ? finalData.images : [];
-    entry.videos = Array.isArray(finalData.videos) ? finalData.videos : [];
-    entry.durationMs = typeof finalData.duration_ms === 'number' ? finalData.duration_ms : entry.elapsedMs;
-    entry.endpoint = finalData.endpoint || '';
-    entry.clientRequestId = finalData.client_request_id || '';
+    task.jobId = String(created.job_id || '').trim();
+    if (!task.jobId) throw new Error('服务未返回任务 ID');
+    entry.jobId = task.jobId;
+    entry.status = String(created.status || 'queued').toLowerCase();
+    updateGlobalMeta(entry);
     renderHistory();
-    return { ok: true, entry, data: finalData };
+
+    const result = await pollJob(task, payload.timeout);
+    entry.status = 'success';
+    entry.elapsedMs = Date.now() - entry.startedAt;
+    entry.durationMs = Number.isFinite(Number(result.duration_ms)) ? Number(result.duration_ms) : entry.elapsedMs;
+    entry.endpoint = String(result.endpoint || '');
+    entry.images = Array.isArray(result.images) ? result.images : [];
+    entry.videos = Array.isArray(result.videos) ? result.videos : [];
+    const mediaCount = entry.images.length + entry.videos.length;
+    setStatus(mediaCount ? `任务完成，返回 ${mediaCount} 个媒体结果。` : '任务完成，但没有返回媒体。');
   } catch (error) {
     entry.elapsedMs = Date.now() - entry.startedAt;
-    stopRequestTimer();
-    entry.status = 'error';
-    entry.durationMs = entry.elapsedMs;
-    entry.errorMessage = error instanceof Error ? error.message : String(error);
-    renderHistory();
-    return { ok: false, entry, error: entry.errorMessage };
-  }
-}
-
-async function generate() {
-  clearError();
-  const state = currentState();
-  const size = getEffectiveSize(state);
-  saveState(state);
-
-  if (!state.baseUrl) {
-    setStatus('warning', '缺少 Base URL');
-    return showError('请先填写 Base URL');
-  }
-  if (!state.apiKey) {
-    setStatus('warning', '缺少 API Key');
-    return showError('请先填写 API Key');
-  }
-  if (!state.prompt.trim()) {
-    setStatus('warning', '缺少提示词');
-    return showError('请输入提示词');
-  }
-  if (state.imageMode === 'edit' && !editImageState) {
-    setStatus('warning', '缺少参考图');
-    return showError(isVideoModel(state.model) ? '图生视频模式下请先上传一张参考图' : '图生图模式下请先上传一张参考图');
-  }
-  if (size.error) {
-    setStatus('warning', '尺寸配置错误');
-    return showError(size.error);
-  }
-
-  els.generateBtn.disabled = true;
-
-  const total = clampInt(state.count, 1, 8);
-  let successCount = 0;
-  let failureCount = 0;
-  const errorMessages = [];
-
-  for (let sequence = 1; sequence <= total; sequence += 1) {
-    const result = await runSingleGenerateTask(state, size.value, sequence, total);
-    if (result.ok) {
-      successCount += 1;
+    if (error?.name === 'AbortError' || task.cancelRequested) {
+      entry.status = 'cancelled';
+      entry.errorMessage ||= '任务已取消。';
     } else {
-      failureCount += 1;
-      errorMessages.push(`任务 ${sequence}/${total}\n${result.error}`);
+      entry.status = 'error';
+      entry.errorMessage = error instanceof Error ? error.message : String(error);
+      showError('生成任务失败', entry.errorMessage);
+      setStatus('任务执行失败。');
     }
+  } finally {
+    stopTaskTimer();
+    els['request-hint'].classList.add('hidden');
+    updateGlobalMeta(entry);
+    renderHistory();
+    if (activeTask === task) activeTask = null;
+    setLoadingState(false);
+    els['cancel-btn'].disabled = false;
+    els['cancel-btn'].textContent = '取消任务';
   }
+}
 
-  if (failureCount === 0) {
-    setStatus('success', total > 1 ? `全部完成 ${successCount}/${total}` : '生成完成');
-    els.metaInfo.textContent = total > 1
-      ? `串行任务全部完成 · 成功 ${successCount}/${total}`
-      : '生成完成';
-  } else if (successCount > 0) {
-    setStatus('warning', `完成 ${successCount}/${total}`);
-    els.metaInfo.textContent = `部分完成 · 成功 ${successCount}/${total} · 失败 ${failureCount}`;
-    showError(errorMessages.join('\n\n'));
+function openLightbox(type, source, title) {
+  lastFocusedElement = document.activeElement;
+  els['lightbox-title'].textContent = title || '媒体预览';
+  if (type === 'video') {
+    els['lightbox-image'].removeAttribute('src');
+    els['lightbox-image'].classList.add('hidden');
+    els['lightbox-video'].src = source;
+    els['lightbox-video'].classList.remove('hidden');
   } else {
-    setStatus('error', '全部失败');
-    els.metaInfo.textContent = `全部失败 · 共 ${failureCount} 个任务`;
-    showError(errorMessages.join('\n\n'));
+    els['lightbox-video'].pause();
+    els['lightbox-video'].removeAttribute('src');
+    els['lightbox-video'].load();
+    els['lightbox-video'].classList.add('hidden');
+    els['lightbox-image'].src = source;
+    els['lightbox-image'].classList.remove('hidden');
   }
-
-  els.generateBtn.disabled = false;
+  els.lightbox.classList.remove('hidden');
+  document.body.classList.add('overflow-hidden');
+  els['lightbox-close'].focus();
 }
 
-function resetSettings() {
-  localStorage.removeItem(STORAGE_KEY);
-  clearEditImageState();
-  hydrateForm(defaults);
-  clearError();
-  els.metaInfo.textContent = '本地设置已清空，请重新填写连接信息';
-  setStatus('idle', '待命');
-  els.saveState.textContent = '设置已清空，请重新填写';
+function closeLightbox() {
+  if (els.lightbox.classList.contains('hidden')) return;
+  els['lightbox-video'].pause();
+  els.lightbox.classList.add('hidden');
+  document.body.classList.remove('overflow-hidden');
+  if (lastFocusedElement instanceof HTMLElement) lastFocusedElement.focus();
 }
 
-function clearHistory() {
-  historyEntries = historyEntries.filter((entry) => entry.status === 'pending');
-  ensureSelectedHistoryId();
-  renderHistory();
-  els.metaInfo.textContent = historyEntries.length ? '历史已清空，当前仍有任务生成中' : '历史已清空';
+function hydrateSettings() {
+  const settings = loadSettings();
+  els.base_url.value = settings.baseUrl;
+  els.protocol.value = settings.protocol;
+  currentMode = settings.mode;
+  els.size.value = settings.size;
+  els.image_count.value = String(settings.count);
+  els.timeout.value = String(settings.timeout);
+  els.video_resolution.value = settings.videoResolution;
+  els.duration.value = String(settings.duration);
+  applyProtocolPreset(settings.model);
 }
 
-function init() {
-  const state = loadState();
-  hydrateForm(state);
-  bindAutosave();
-  renderEditImagePreview();
-
-  els.generateBtn.addEventListener('click', generate);
-  els.fillExampleBtn.addEventListener('click', () => {
-    els.prompt.value = examplePrompt;
-    saveState(currentState());
+function bindEvents() {
+  els['protocol-control'].addEventListener('click', (event) => {
+    const button = event.target.closest('[data-protocol]');
+    if (button) switchProtocol(button.dataset.protocol);
   });
-  els.clearPromptBtn.addEventListener('click', () => {
-    els.prompt.value = '';
-    saveState(currentState());
+  els['mode-control'].addEventListener('click', (event) => {
+    const button = event.target.closest('[data-mode]');
+    if (button) switchMode(button.dataset.mode);
   });
-  els.resetSettingsBtn.addEventListener('click', resetSettings);
-  els.clearHistoryBtn.addEventListener('click', clearHistory);
-
-  els.themeToggle.addEventListener('click', () => {
-    const state = currentState();
-    state.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    saveState(state);
+  els['config-form'].addEventListener('submit', submitGeneration);
+  els['cancel-btn'].addEventListener('click', cancelActiveTask);
+  els['clear-history-btn'].addEventListener('click', () => {
+    historyEntries = [];
+    hideError();
+    renderHistory();
+    els['meta-panel'].classList.add('hidden');
+    setStatus('任务历史已清空。');
   });
 
-  els.imageModeGenerate.addEventListener('click', () => {
-    updateImageModeUI('generate');
-    saveState(currentState());
-  });
-  els.imageModeEdit.addEventListener('click', () => {
-    updateImageModeUI('edit');
-    saveState(currentState());
-  });
-
-  els.editImageDropzone.addEventListener('click', () => els.editImageInput.click());
-  els.editImageDropzone.addEventListener('keydown', (event) => {
+  els['reference-dropzone'].addEventListener('click', () => els['file-input'].click());
+  els['reference-dropzone'].addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      els.editImageInput.click();
+      els['file-input'].click();
     }
   });
-  els.editImageInput.addEventListener('change', async () => {
-    const [file] = Array.from(els.editImageInput.files || []);
-    if (!file) return;
+  els['file-input'].addEventListener('change', async (event) => {
+    hideError();
     try {
-      await handleEditImageFile(file);
-      clearError();
+      await addReferenceFiles(Array.from(event.target.files || []));
     } catch (error) {
-      showError(error instanceof Error ? error.message : String(error));
+      showError('读取参考图失败', error instanceof Error ? error.message : String(error));
     } finally {
-      els.editImageInput.value = '';
+      event.target.value = '';
     }
   });
-  els.clearEditImageBtn.addEventListener('click', () => clearEditImageState());
+  els['clear-upload-btn'].addEventListener('click', (event) => {
+    event.stopPropagation();
+    clearReferenceImages();
+  });
 
-  els.editImageDropzone.addEventListener('dragenter', (event) => {
-    event.preventDefault();
-    dragDepth += 1;
-    els.editImageDropzone.classList.add('is-dragover');
-  });
-  els.editImageDropzone.addEventListener('dragover', (event) => {
-    event.preventDefault();
-    els.editImageDropzone.classList.add('is-dragover');
-  });
-  ['dragleave', 'dragend'].forEach((eventName) => {
-    els.editImageDropzone.addEventListener(eventName, (event) => {
+  for (const eventName of ['dragenter', 'dragover']) {
+    els['reference-dropzone'].addEventListener(eventName, (event) => {
       event.preventDefault();
-      dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) {
-        els.editImageDropzone.classList.remove('is-dragover');
-      }
+      els['reference-dropzone'].classList.add('dropzone-active');
     });
-  });
-  els.editImageDropzone.addEventListener('drop', async (event) => {
-    event.preventDefault();
-    dragDepth = 0;
-    els.editImageDropzone.classList.remove('is-dragover');
-    const [file] = Array.from(event.dataTransfer?.files || []);
-    if (!file) return;
-    try {
-      await handleEditImageFile(file);
-      clearError();
-    } catch (error) {
-      showError(error instanceof Error ? error.message : String(error));
-    }
+  }
+  for (const eventName of ['dragleave', 'drop']) {
+    els['reference-dropzone'].addEventListener(eventName, (event) => {
+      event.preventDefault();
+      els['reference-dropzone'].classList.remove('dropzone-active');
+    });
+  }
+  els['reference-dropzone'].addEventListener('drop', async (event) => {
+    hideError();
+    await addReferenceFiles(Array.from(event.dataTransfer?.files || []));
   });
 
-  els.sizeModePreset.addEventListener('click', () => {
-    updateSizeModeUI('preset');
-    saveState(currentState());
+  for (const id of ['base_url', 'model', 'size', 'image_count', 'timeout', 'video_resolution', 'duration']) {
+    els[id].addEventListener('change', persistSettings);
+  }
+  els['image_count'].addEventListener('blur', () => {
+    els['image_count'].value = String(clampInt(els['image_count'].value, 1, getProtocolConfig().maxOutputs, 1));
   });
-  els.sizeModeCustom.addEventListener('click', () => {
-    updateSizeModeUI('custom');
-    saveState(currentState());
+  els.timeout.addEventListener('blur', () => {
+    els.timeout.value = String(clampInt(els.timeout.value, 5, 600, 500));
+  });
+  els.duration.addEventListener('blur', () => {
+    els.duration.value = String(clampInt(els.duration.value, 1, 15, 10));
   });
 
-  els.lightboxBackdrop.addEventListener('click', closeLightbox);
-  els.lightboxClose.addEventListener('click', closeLightbox);
-  els.lightboxPrev.addEventListener('click', () => moveLightbox(-1));
-  els.lightboxNext.addEventListener('click', () => moveLightbox(1));
+  els['lightbox-close'].addEventListener('click', closeLightbox);
+  els['lightbox-backdrop'].addEventListener('click', closeLightbox);
   document.addEventListener('keydown', (event) => {
-    if (els.lightbox.classList.contains('hidden')) return;
     if (event.key === 'Escape') closeLightbox();
-    if (event.key === 'ArrowLeft') moveLightbox(-1);
-    if (event.key === 'ArrowRight') moveLightbox(1);
   });
-
-  setStatus('idle', '待命');
-  els.metaInfo.textContent = '尚未发起请求';
-  renderHistory();
+  window.addEventListener('online', checkHealth);
+  window.addEventListener('offline', () => setHealthStatus(false));
 }
 
-init();
+hydrateSettings();
+bindEvents();
+renderHistory();
+checkHealth();

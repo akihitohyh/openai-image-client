@@ -1,0 +1,12 @@
+{
+  "name": "openai-image-client-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build:css": "tailwindcss -i ./web/tailwind.css -o ./web/styles.css --minify",
+    "check:frontend": "npm run build:css && node --check web/app.js && node --test web/frontend.test.mjs"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

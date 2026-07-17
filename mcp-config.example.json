@@ -1,0 +1,42 @@
+{
+  "default_profile": "openai",
+  "output_dir": "./outputs/mcp",
+  "allowed_input_roots": [
+    "./inputs"
+  ],
+  "max_workers": 2,
+  "max_queue": 20,
+  "max_jobs": 200,
+  "job_ttl_seconds": 86400,
+  "max_reference_bytes": 20971520,
+  "max_output_bytes": 268435456,
+  "max_asset_store_bytes": 2147483648,
+  "profiles": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_IMAGE_OPENAI_API_KEY",
+      "protocol": "openai",
+      "image_model": "gpt-image-2",
+      "allowed_models": [
+        "gpt-image-2"
+      ],
+      "timeout": 500
+    },
+    "grok": {
+      "base_url": "https://api.x.ai/v1",
+      "api_key_env": "OPENAI_IMAGE_GROK_API_KEY",
+      "protocol": "grok",
+      "image_model": "grok-imagine-image",
+      "video_model": "grok-imagine-video-1.5",
+      "allowed_models": [
+        "grok-imagine",
+        "grok-imagine-edit",
+        "grok-imagine-image",
+        "grok-imagine-image-quality",
+        "grok-imagine-video",
+        "grok-imagine-video-1.5"
+      ],
+      "timeout": 500
+    }
+  }
+}

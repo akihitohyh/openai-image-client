@@ -3,6 +3,9 @@
 
 # Python
 __pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
 *.py[cod]
 *.pyo
 *.pyd
@@ -16,6 +19,9 @@ dist/
 .venv/
 venv/
 
+# Node
+node_modules/
+
 # Local runtime data
 outputs/
 .run/
@@ -23,6 +29,12 @@ outputs/
 # Local private config
 config.json
 config.local.json*
+mcp-config.json
+mcp-config.local.json*
+mcp-http-auth.json
+http-auth.json
+http-auth.local.json*
+mcp-http.env
 .env
 .env.*
 !.env.example
