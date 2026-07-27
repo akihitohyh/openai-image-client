@@ -1,98 +1,111 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="h-full bg-slate-50">
+<html lang="zh-CN" class="h-full bg-ink-950">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
-    <title>图像/视频生成控制台</title>
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0b0d11">
+    <title>图像 / 视频生成工作台</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="./styles.css">
     <script src="./app.js" defer></script>
 </head>
-<body class="min-h-full md:h-full text-slate-900 antialiased flex flex-col">
-    <header class="bg-white border-b border-slate-200 shrink-0">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-14 py-2 flex items-center justify-between gap-4">
+<body class="min-h-full md:h-full text-zinc-200 antialiased flex flex-col">
+    <header class="shrink-0 sticky top-0 z-30 bg-ink-950/85 backdrop-blur-md border-b border-white/[0.07]">
+        <div class="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 min-h-16 py-3 flex items-center justify-between gap-4">
             <div class="flex items-center gap-3 min-w-0">
-                <span class="w-3 h-3 rounded-full bg-emerald-500 shrink-0" aria-hidden="true"></span>
-                <span class="font-semibold text-sm uppercase text-slate-700 truncate">Image / Video Client Web API</span>
-                <span class="hidden sm:inline text-xs px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md border border-slate-200">v1.2</span>
+                <span class="relative grid place-items-center w-9 h-9 rounded-xl bg-gradient-to-br from-accent/25 to-violet-500/20 border border-accent/30 shrink-0" aria-hidden="true">
+                    <svg class="w-[18px] h-[18px] text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.2 5.4L20 10l-5.8 1.6L12 17l-2.2-5.4L4 10l5.8-1.6z"/></svg>
+                </span>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                        <h1 class="font-semibold text-sm text-zinc-100 tracking-tight truncate">图像 / 视频生成工作台</h1>
+                        <span class="hidden sm:inline text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/[0.06] text-zinc-500 border border-white/10">v1.2</span>
+                    </div>
+                    <p class="text-[11px] text-zinc-600 truncate hidden sm:block">OpenAI · Grok 图像与视频统一控制台</p>
+                </div>
             </div>
-            <div id="service-status" class="text-xs text-slate-500 text-right" role="status" aria-live="polite">正在连接后端...</div>
+            <div id="service-status" class="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 shrink-0" role="status" aria-live="polite">正在连接后端...</div>
         </div>
     </header>
 
-    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6 overflow-y-visible md:overflow-hidden">
-        <section class="w-full md:w-[400px] shrink-0 bg-white border border-slate-200 rounded-lg shadow-sm flex flex-col overflow-y-visible md:overflow-y-auto no-scrollbar" aria-labelledby="config-title">
-            <div class="p-4 border-b border-slate-100 bg-slate-50/50">
-                <h1 id="config-title" class="text-sm font-semibold text-slate-800">接口与参数配置</h1>
-                <p id="protocol-desc" class="text-xs text-slate-500 mt-1">OpenAI 生图使用 Images API，适合 gpt-image-2。</p>
+    <main class="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 lg:px-8 py-5 flex flex-col md:flex-row gap-5 overflow-y-visible md:overflow-hidden">
+        <section class="w-full md:w-[400px] shrink-0 panel flex flex-col overflow-y-visible md:overflow-y-auto no-scrollbar" aria-labelledby="config-title">
+            <div class="px-5 pt-5 pb-4 border-b border-white/[0.07]">
+                <h2 id="config-title" class="text-sm font-semibold text-zinc-100">接口与参数配置</h2>
+                <p id="protocol-desc" class="text-xs text-zinc-500 mt-1 leading-relaxed">OpenAI 生图使用 Images API，适合 gpt-image-2。</p>
             </div>
 
-            <form id="config-form" class="p-4 space-y-4 flex-1">
-                <div>
-                    <label for="base_url" class="block text-xs font-semibold text-slate-600 mb-1">Base URL</label>
-                    <input type="url" id="base_url" required autocomplete="url" placeholder="https://api.openai.com/v1"
-                        class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
-                </div>
-
-                <div>
-                    <label for="api_key" class="block text-xs font-semibold text-slate-600 mb-1">API Key</label>
-                    <input type="password" id="api_key" required autocomplete="new-password" spellcheck="false" placeholder="sk-..."
-                        class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
-                    <p class="mt-1 text-[11px] text-slate-400">密钥仅用于本次请求，不会保存到浏览器。</p>
-                </div>
+            <form id="config-form" class="px-5 py-5 space-y-5 flex-1">
+                <details class="disclosure" open>
+                    <summary>连接设置</summary>
+                    <div class="mt-3 space-y-3">
+                        <div>
+                            <label for="base_url" class="field-label">Base URL</label>
+                            <input type="url" id="base_url" required autocomplete="url" placeholder="https://api.openai.com/v1" class="field">
+                        </div>
+                        <div>
+                            <label for="api_key" class="field-label">API Key</label>
+                            <input type="password" id="api_key" required autocomplete="new-password" spellcheck="false" placeholder="sk-..." class="field font-mono">
+                            <p class="mt-1.5 text-[11px] text-zinc-600 flex items-start gap-1.5">
+                                <svg class="w-3.5 h-3.5 mt-px shrink-0 text-zinc-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 118 0v3"/></svg>
+                                <span>密钥仅用于本次请求，不会保存到浏览器。</span>
+                            </p>
+                        </div>
+                    </div>
+                </details>
 
                 <fieldset>
-                    <legend class="block text-xs font-semibold text-slate-600 mb-1.5">协议 (Protocol)</legend>
+                    <legend class="field-label">协议 (Protocol)</legend>
                     <input type="hidden" id="protocol" value="openai-image">
-                    <div id="protocol-control" class="grid grid-cols-1 sm:grid-cols-3 gap-2 bg-slate-100 p-1 rounded-lg">
-                        <button type="button" id="protocol-openai-image" data-protocol="openai-image" aria-pressed="true" class="text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition">OpenAI 生图</button>
-                        <button type="button" id="protocol-grok-image" data-protocol="grok-image" aria-pressed="false" class="text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition">Grok 生图</button>
-                        <button type="button" id="protocol-grok-video" data-protocol="grok-video" aria-pressed="false" class="text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition">Grok 视频</button>
+                    <div id="protocol-control" class="segment grid-cols-1 sm:grid-cols-3">
+                        <button type="button" id="protocol-openai-image" data-protocol="openai-image" aria-pressed="true" class="text-xs py-2 rounded-lg font-medium text-center bg-white/[0.09] text-zinc-100 shadow-sm transition">OpenAI 生图</button>
+                        <button type="button" id="protocol-grok-image" data-protocol="grok-image" aria-pressed="false" class="text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">Grok 生图</button>
+                        <button type="button" id="protocol-grok-video" data-protocol="grok-video" aria-pressed="false" class="text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">Grok 视频</button>
                     </div>
                 </fieldset>
 
-                <hr class="border-slate-100">
-
                 <fieldset>
-                    <legend id="mode-label" class="block text-xs font-semibold text-slate-600 mb-1.5">作业模式</legend>
-                    <div id="mode-control" class="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-lg">
-                        <button type="button" id="mode-generate" data-mode="generate" aria-pressed="true" class="text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition">文生图 (Generate)</button>
-                        <button type="button" id="mode-edit" data-mode="edit" aria-pressed="false" class="text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition">图生图 (Edit)</button>
+                    <legend id="mode-label" class="field-label">作业模式</legend>
+                    <div id="mode-control" class="segment grid-cols-2">
+                        <button type="button" id="mode-generate" data-mode="generate" aria-pressed="true" class="text-xs py-2 rounded-lg font-medium text-center bg-white/[0.09] text-zinc-100 shadow-sm transition">文生图 (Generate)</button>
+                        <button type="button" id="mode-edit" data-mode="edit" aria-pressed="false" class="text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">图生图 (Edit)</button>
                     </div>
                 </fieldset>
 
                 <div id="edit-image-container" class="hidden animate-fade-in">
-                    <span id="reference-label" class="block text-xs font-semibold text-slate-600 mb-1">参考图 (OpenAI 最多 16 张)</span>
-                    <p class="mb-2 text-[11px] text-slate-400">单张不超过 10 MB，全部参考图合计不超过 30 MB。</p>
+                    <span id="reference-label" class="field-label">参考图 (OpenAI 最多 16 张)</span>
                     <div id="reference-dropzone" role="button" tabindex="0" aria-labelledby="reference-label upload-placeholder"
-                        class="border-2 border-dashed border-slate-200 rounded-lg p-4 text-center hover:bg-slate-50 transition cursor-pointer relative focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2">
+                        class="border border-dashed border-white/15 rounded-xl p-5 text-center bg-ink-850/60 hover:border-accent/40 hover:bg-accent/[0.04] transition cursor-pointer relative focus:outline-none focus:ring-2 focus:ring-accent/40">
                         <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" multiple class="hidden">
-                        <p id="upload-placeholder" class="text-xs text-slate-500">点击选择或追加参考图像</p>
-                        <div id="upload-preview-grid" class="hidden mt-3 grid grid-cols-3 gap-2"></div>
+                        <svg class="w-6 h-6 mx-auto mb-2 text-zinc-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L8 8m4-4l4 4"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+                        <p id="upload-placeholder" class="text-xs text-zinc-400 font-medium">点击选择或拖入参考图像</p>
+                        <p class="mt-1 text-[11px] text-zinc-600">单张 ≤ 10 MB，合计 ≤ 30 MB · PNG / JPG / WEBP</p>
+                        <div id="upload-preview-grid" class="hidden mt-4 grid grid-cols-3 gap-2"></div>
                     </div>
                     <div class="mt-2 flex items-center justify-between gap-2 text-xs">
-                        <span id="upload-count" class="text-slate-500" aria-live="polite">尚未选择图片</span>
-                        <button type="button" id="clear-upload-btn" class="hidden text-slate-500 hover:text-rose-600 transition">清空参考图</button>
+                        <span id="upload-count" class="text-zinc-500" aria-live="polite">尚未选择图片</span>
+                        <button type="button" id="clear-upload-btn" class="hidden text-zinc-500 hover:text-rose-400 transition">清空参考图</button>
                     </div>
                 </div>
 
                 <div>
-                    <label id="prompt-label" for="prompt" class="block text-xs font-semibold text-slate-600 mb-1">提示词 (Prompt)</label>
-                    <textarea id="prompt" rows="6" required placeholder="例如: A professional minimalist workspace, cinematic lighting..."
-                        class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition resize-none"></textarea>
+                    <label id="prompt-label" for="prompt" class="field-label">提示词 (Prompt)</label>
+                    <textarea id="prompt" rows="7" required placeholder="例如: A professional minimalist workspace, cinematic lighting..."
+                        class="field resize-none leading-relaxed"></textarea>
                 </div>
 
                 <div class="grid grid-cols-2 gap-3">
                     <div>
-                        <label for="model" class="block text-xs font-semibold text-slate-600 mb-1">模型 (Model)</label>
-                        <select id="model" class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                        <label for="model" class="field-label">模型 (Model)</label>
+                        <select id="model" class="field">
                             <option value="gpt-image-2">gpt-image-2</option>
                         </select>
                     </div>
                     <div>
-                        <label id="size-label" for="size" class="block text-xs font-semibold text-slate-600 mb-1">分辨率 (Size)</label>
-                        <select id="size" class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                        <label id="size-label" for="size" class="field-label">分辨率 (Size)</label>
+                        <select id="size" class="field">
                             <option value="1024x1024">1024x1024</option>
                             <option value="1024x1536">1024x1536</option>
                             <option value="1536x1024">1536x1024</option>
@@ -104,83 +117,93 @@
 
                 <div id="video-options" class="hidden grid grid-cols-2 gap-3">
                     <div>
-                        <label for="video_resolution" class="block text-xs font-semibold text-slate-600 mb-1">视频分辨率</label>
-                        <select id="video_resolution" class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                        <label for="video_resolution" class="field-label">视频分辨率</label>
+                        <select id="video_resolution" class="field">
                             <option value="480p">480p</option>
                             <option value="720p" selected>720p</option>
                             <option value="1080p">1080p</option>
                         </select>
                     </div>
                     <div>
-                        <label for="duration" class="block text-xs font-semibold text-slate-600 mb-1">视频时长 (秒)</label>
-                        <input type="number" id="duration" value="10" min="1" max="15"
-                            class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                        <label for="duration" class="field-label">视频时长 (秒)</label>
+                        <input type="number" id="duration" value="10" min="1" max="15" class="field font-mono">
                     </div>
                 </div>
 
-                <div class="grid grid-cols-2 gap-3">
-                    <div>
-                        <label id="count-label" for="image_count" class="block text-xs font-semibold text-slate-600 mb-1">生成张数 (n)</label>
-                        <input type="number" id="image_count" value="1" min="1" max="8"
-                            class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
+                <details class="disclosure">
+                    <summary>高级设置</summary>
+                    <div class="mt-3 grid grid-cols-2 gap-3">
+                        <div>
+                            <label id="count-label" for="image_count" class="field-label">生成张数 (n)</label>
+                            <input type="number" id="image_count" value="1" min="1" max="8" class="field font-mono">
+                        </div>
+                        <div>
+                            <label id="timeout-label" for="timeout" class="field-label">超时断开 (秒)</label>
+                            <input type="number" id="timeout" value="500" min="5" max="600" class="field font-mono">
+                        </div>
                     </div>
-                    <div>
-                        <label id="timeout-label" for="timeout" class="block text-xs font-semibold text-slate-600 mb-1">超时断开 (秒)</label>
-                        <input type="number" id="timeout" value="500" min="5" max="600"
-                            class="w-full text-sm px-3 py-2 bg-white border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition">
-                    </div>
-                </div>
+                </details>
 
-                <button type="submit" id="submit-btn" class="w-full bg-slate-900 text-white font-medium text-sm py-2.5 rounded-lg shadow hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 transition flex items-center justify-center gap-2">
+                <button type="submit" id="submit-btn"
+                    class="w-full bg-accent text-ink-950 font-semibold text-sm py-3 rounded-xl transition
+                           hover:bg-accent-soft hover:shadow-glow
+                           focus:outline-none focus:ring-2 focus:ring-accent/50 focus:ring-offset-2 focus:ring-offset-ink-900
+                           disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-accent disabled:hover:shadow-none
+                           flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.2 5.4L20 10l-5.8 1.6L12 17l-2.2-5.4L4 10l5.8-1.6z"/></svg>
                     <span>发送生成请求</span>
                 </button>
             </form>
         </section>
 
-        <section class="flex-1 min-h-[520px] md:min-h-0 bg-white border border-slate-200 rounded-lg shadow-sm flex flex-col overflow-hidden" aria-labelledby="output-title">
-            <div class="p-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50 shrink-0">
+        <section class="flex-1 min-h-[520px] md:min-h-0 panel flex flex-col overflow-hidden" aria-labelledby="output-title">
+            <div class="px-5 py-4 border-b border-white/[0.07] flex items-center justify-between gap-3 shrink-0">
                 <div class="min-w-0">
-                    <h2 id="output-title" class="text-sm font-semibold text-slate-800">控制台输出与任务历史</h2>
-                    <p class="text-xs text-slate-500 mt-0.5 truncate" id="job-status-desc" role="status" aria-live="polite">等待提交新任务...</p>
+                    <h2 id="output-title" class="text-sm font-semibold text-zinc-100">输出与任务历史</h2>
+                    <p class="text-xs text-zinc-500 mt-0.5 truncate" id="job-status-desc" role="status" aria-live="polite">等待提交新任务...</p>
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                     <div id="loader" class="hidden" aria-label="任务处理中" role="status">
-                        <svg class="animate-spin h-5 w-5 text-slate-600" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        <svg class="animate-spin h-5 w-5 text-accent" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                            <circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle>
+                            <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
                         </svg>
                     </div>
-                    <button type="button" id="cancel-btn" class="hidden text-xs px-3 py-1.5 rounded-md border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 focus:outline-none focus:ring-2 focus:ring-rose-500">取消任务</button>
-                    <button type="button" id="clear-history-btn" class="text-xs px-3 py-1.5 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-500">清空历史</button>
+                    <button type="button" id="cancel-btn" class="hidden text-xs px-3 py-1.5 rounded-lg border border-rose-500/25 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 transition focus:outline-none focus:ring-2 focus:ring-rose-500/40 disabled:opacity-50">取消任务</button>
+                    <button type="button" id="clear-history-btn" class="text-xs px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200 transition focus:outline-none focus:ring-2 focus:ring-accent/40">清空历史</button>
                 </div>
             </div>
 
-            <div class="flex-1 p-4 sm:p-6 overflow-y-auto space-y-4">
-                <div id="diagnostic-panel" class="hidden border border-rose-200 bg-rose-50/40 rounded-lg p-4" role="alert">
-                    <div class="flex items-center gap-2 text-rose-800 font-semibold text-xs uppercase mb-2">
-                        <span class="w-2 h-2 rounded-full bg-rose-500" aria-hidden="true"></span>
+            <div class="flex-1 p-5 sm:p-6 overflow-y-auto space-y-4">
+                <div id="diagnostic-panel" class="hidden border border-rose-500/25 bg-rose-500/[0.07] rounded-xl p-4 animate-fade-in" role="alert">
+                    <div class="flex items-center gap-2 text-rose-300 font-semibold text-[11px] uppercase tracking-wide mb-2">
+                        <span class="w-1.5 h-1.5 rounded-full bg-rose-400" aria-hidden="true"></span>
                         <span>错误诊断报告</span>
                     </div>
-                    <p id="error-message" class="text-sm text-rose-700 font-medium"></p>
-                    <pre id="diagnostic-details" class="mt-3 text-xs font-mono text-slate-600 bg-white border border-slate-100 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap leading-relaxed"></pre>
+                    <p id="error-message" class="text-sm text-rose-200 font-medium leading-relaxed"></p>
+                    <pre id="diagnostic-details" class="mt-3 text-[11px] font-mono text-zinc-400 bg-ink-950/70 border border-white/[0.07] p-3 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap leading-relaxed"></pre>
                 </div>
 
-                <div id="meta-panel" class="hidden border border-slate-200 bg-slate-50/50 rounded-lg p-3 text-xs grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono">
-                    <div><span class="text-slate-400">Task ID:</span> <span id="meta-req-id" class="text-slate-700 break-all"></span></div>
-                    <div><span class="text-slate-400">核心耗时:</span> <span id="meta-duration" class="text-slate-700"></span></div>
-                    <div><span class="text-slate-400">等待时间:</span> <span id="meta-wait" class="text-slate-700">00:00</span></div>
-                    <div><span class="text-slate-400">调用端点:</span> <span id="meta-endpoint" class="text-slate-700 break-all"></span></div>
-                    <div><span class="text-slate-400">任务状态:</span> <span id="meta-status" class="text-slate-700"></span></div>
+                <div id="meta-panel" class="hidden border border-white/[0.07] bg-ink-850/50 rounded-xl p-3.5 text-[11px] grid grid-cols-2 sm:grid-cols-5 gap-3 font-mono">
+                    <div class="min-w-0"><span class="text-zinc-600 block mb-0.5">Task ID</span> <span id="meta-req-id" class="text-zinc-300 break-all"></span></div>
+                    <div class="min-w-0"><span class="text-zinc-600 block mb-0.5">核心耗时</span> <span id="meta-duration" class="text-zinc-300"></span></div>
+                    <div class="min-w-0"><span class="text-zinc-600 block mb-0.5">等待时间</span> <span id="meta-wait" class="text-accent">00:00</span></div>
+                    <div class="min-w-0"><span class="text-zinc-600 block mb-0.5">调用端点</span> <span id="meta-endpoint" class="text-zinc-300 break-all"></span></div>
+                    <div class="min-w-0"><span class="text-zinc-600 block mb-0.5">任务状态</span> <span id="meta-status" class="text-zinc-300"></span></div>
                 </div>
 
-                <div id="request-hint" class="hidden border border-sky-200 bg-sky-50/70 rounded-lg p-3 text-xs text-sky-800">
-                    <span id="request-message">正在等待异步任务</span>；已等待 <span id="request-elapsed" class="font-mono font-semibold">00:00</span>。
+                <div id="request-hint" class="hidden relative overflow-hidden border border-accent/20 bg-accent/[0.06] rounded-xl p-3.5 text-xs text-accent-soft">
+                    <span class="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-accent/10 to-transparent" aria-hidden="true"></span>
+                    <span class="relative"><span id="request-message">正在等待异步任务</span>；已等待 <span id="request-elapsed" class="font-mono font-semibold">00:00</span>。</span>
                 </div>
 
                 <div id="history-list" class="space-y-4" aria-label="任务历史">
-                    <div id="history-empty" class="border border-dashed border-slate-200 rounded-lg min-h-48 flex flex-col items-center justify-center text-slate-400 bg-slate-50/30">
-                        <svg class="w-8 h-8 opacity-40 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V6.75z"></path></svg>
-                        <span class="text-xs">暂无任务记录</span>
+                    <div id="history-empty" class="border border-dashed border-white/10 rounded-2xl min-h-[18rem] flex flex-col items-center justify-center text-center px-6 bg-ink-950/40">
+                        <span class="grid place-items-center w-14 h-14 rounded-2xl bg-gradient-to-br from-accent/15 to-violet-500/10 border border-white/10 mb-4">
+                            <svg class="w-6 h-6 text-accent/70" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V6.75z"></path></svg>
+                        </span>
+                        <p class="text-sm font-medium text-zinc-400">暂无任务记录</p>
+                        <p class="mt-1.5 text-xs text-zinc-600 max-w-xs leading-relaxed">填好左侧的 Base URL 与 API Key，写一段提示词，生成结果会显示在这里。</p>
                     </div>
                 </div>
             </div>
@@ -190,12 +213,12 @@
     <div id="lightbox" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="lightbox-title">
         <div id="lightbox-backdrop" class="lightbox-backdrop absolute inset-0"></div>
         <div class="relative z-10 h-full w-full flex items-center justify-center p-4">
-            <div class="max-w-6xl w-full bg-white rounded-lg shadow-2xl overflow-hidden">
-                <div class="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-                    <p id="lightbox-title" class="text-sm font-semibold text-slate-800">媒体预览</p>
-                    <button id="lightbox-close" type="button" class="bg-slate-900 text-white text-xs px-3 py-1.5 rounded-md hover:bg-slate-800 transition">关闭</button>
+            <div class="max-w-6xl w-full bg-ink-900 border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
+                <div class="flex items-center justify-between px-5 py-3.5 border-b border-white/[0.07]">
+                    <p id="lightbox-title" class="text-sm font-semibold text-zinc-100">媒体预览</p>
+                    <button id="lightbox-close" type="button" class="text-xs px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white transition focus:outline-none focus:ring-2 focus:ring-accent/40">关闭</button>
                 </div>
-                <div class="bg-slate-100 flex items-center justify-center max-h-[82vh]">
+                <div class="checkerboard flex items-center justify-center max-h-[82vh]">
                     <img id="lightbox-image" class="max-w-full max-h-[82vh] object-contain" alt="媒体预览">
                     <video id="lightbox-video" class="hidden max-w-full max-h-[82vh]" controls playsinline></video>
                 </div>

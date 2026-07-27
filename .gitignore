@@ -37,6 +37,7 @@ http-auth.local.json*
 mcp-http.env
 .env
 .env.*
+*.env
 !.env.example
 
 # Local scratch files

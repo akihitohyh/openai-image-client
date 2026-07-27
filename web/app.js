@@ -107,9 +107,12 @@ const els = Object.fromEntries([
 let currentMode = 'generate';
 let uploadedReferenceImages = [];
 let activeTask = null;
+let isPreparingSubmission = false;
 let taskTimerId = null;
 let historyEntries = [];
 let lastFocusedElement = null;
+// entry.id -> { node, signature }，用于历史列表的增量渲染
+const historyNodes = new Map();
 
 function clampInt(value, min, max, fallback) {
   const number = Number(value);
@@ -158,10 +161,17 @@ function clearLegacySecrets() {
   }
 }
 
+function isKnownSizeOption(value) {
+  const options = document.getElementById('size')?.options;
+  if (!options || !options.length) return Boolean(value);
+  return Array.from(options).some((option) => option.value === String(value));
+}
+
 function loadSettings() {
   clearLegacySecrets();
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+
     const protocol = PROTOCOL_CONFIG[parsed.protocol] ? parsed.protocol : DEFAULT_SETTINGS.protocol;
     const config = PROTOCOL_CONFIG[protocol];
     const model = config.models.includes(parsed.model) ? parsed.model : config.defaultModel;
@@ -170,7 +180,9 @@ function loadSettings() {
       mode: parsed.mode === 'edit' ? 'edit' : 'generate',
       baseUrl: safePersistableBaseUrl(parsed.baseUrl),
       model,
-      size: String(parsed.size || DEFAULT_SETTINGS.size),
+      // 必须对照 <select> 的选项校验：其余字段都验了，只有 size 没验，
+      // 于是一个陌生值会让 els.size.value 变成空字符串，最终提交 size: ""。
+      size: isKnownSizeOption(parsed.size) ? String(parsed.size) : DEFAULT_SETTINGS.size,
       count: clampInt(parsed.count, 1, config.maxOutputs, DEFAULT_SETTINGS.count),
       timeout: clampInt(parsed.timeout, 5, 600, DEFAULT_SETTINGS.timeout),
       videoResolution: ['480p', '720p', '1080p'].includes(parsed.videoResolution)
@@ -232,9 +244,11 @@ function formatApiError(data) {
 
 function setHealthStatus(ok) {
   els['service-status'].textContent = ok ? '● 后端服务在线' : '● 后端连接失败';
-  els['service-status'].classList.toggle('text-emerald-600', ok);
-  els['service-status'].classList.toggle('font-medium', ok);
-  els['service-status'].classList.toggle('text-rose-600', !ok);
+  // 必须移除初始的 text-zinc-500：它在编译后的 styles.css 里排在状态色之后，
+  // 同优先级下会把颜色盖掉（这正是改版前健康灯永远是灰色的原因）。
+  els['service-status'].classList.remove('text-zinc-500');
+  els['service-status'].classList.toggle('text-emerald-400', ok);
+  els['service-status'].classList.toggle('text-rose-400', !ok);
 }
 
 async function checkHealth() {
@@ -273,25 +287,25 @@ function setLoadingState(isLoading) {
   els['clear-history-btn'].classList.toggle('opacity-50', isLoading);
 }
 
-function updateProtocolButtons() {
-  const selected = getSelectedProtocol();
-  for (const button of els['protocol-control'].querySelectorAll('[data-protocol]')) {
-    const active = button.dataset.protocol === selected;
+// 分段控件的两种状态。写成常量，避免在多处复制同一串 class；
+// tailwind.config.js 的 content 包含 app.js，所以这些类名不会被 purge 掉。
+const SEGMENT_ACTIVE = 'text-xs py-2 rounded-lg font-medium text-center bg-white/[0.09] text-zinc-100 shadow-sm transition';
+const SEGMENT_IDLE = 'text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition';
+
+function setSegmentedControl(container, attribute, activeValue) {
+  for (const button of container.querySelectorAll(`[data-${attribute}]`)) {
+    const active = button.dataset[attribute] === activeValue;
     button.setAttribute('aria-pressed', String(active));
-    button.className = active
-      ? 'text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition'
-      : 'text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition';
+    button.className = active ? SEGMENT_ACTIVE : SEGMENT_IDLE;
   }
 }
 
+function updateProtocolButtons() {
+  setSegmentedControl(els['protocol-control'], 'protocol', getSelectedProtocol());
+}
+
 function updateModeButtons() {
-  for (const button of els['mode-control'].querySelectorAll('[data-mode]')) {
-    const active = button.dataset.mode === currentMode;
-    button.setAttribute('aria-pressed', String(active));
-    button.className = active
-      ? 'text-xs py-1.5 rounded-md font-medium text-center bg-white shadow-sm text-slate-800 transition'
-      : 'text-xs py-1.5 rounded-md font-medium text-center text-slate-500 hover:text-slate-800 transition';
-  }
+  setSegmentedControl(els['mode-control'], 'mode', currentMode);
   els['edit-image-container'].classList.toggle('hidden', currentMode !== 'edit');
 }
 
@@ -383,55 +397,87 @@ async function addReferenceFiles(files) {
     warnings.push(`当前协议最多上传 ${maximum} 张，仅保留本次前 ${remaining} 张`);
   }
 
+  // 只保留 File 引用 + 一个 blob: 预览地址。base64 直到提交时才生成，
+  // 否则 30MB 上限的参考图会以 ~41MB 的字符串常驻整个会话，并且预览用的
+  // <img> 还会再持有一份解码后的副本。
   for (const file of accepted.slice(0, remaining)) {
     uploadedReferenceImages.push({
       name: file.name || 'reference-image',
       content_type: file.type || 'image/png',
       size: file.size,
-      data_url: await readFileAsDataUrl(file),
+      file,
+      previewUrl: URL.createObjectURL(file),
     });
   }
   renderReferenceImages();
   if (warnings.length) showError('部分参考图未添加', warnings.join('\n'));
 }
 
+async function handleIncomingFiles(fileList) {
+  hideError();
+  try {
+    await addReferenceFiles(Array.from(fileList || []));
+  } catch (error) {
+    showError('读取参考图失败', error instanceof Error ? error.message : String(error));
+  }
+}
+
+function releaseReferencePreview(reference) {
+  if (reference && reference.previewUrl) URL.revokeObjectURL(reference.previewUrl);
+}
+
 function removeReferenceImage(index) {
-  uploadedReferenceImages.splice(index, 1);
+  const [removed] = uploadedReferenceImages.splice(index, 1);
+  releaseReferencePreview(removed);
   renderReferenceImages();
 }
 
 function clearReferenceImages() {
+  uploadedReferenceImages.forEach(releaseReferencePreview);
   uploadedReferenceImages = [];
   els['file-input'].value = '';
   renderReferenceImages();
 }
 
+async function buildEditImagePayloads() {
+  // 并发读取（原实现在循环里串行 await），并且只在这一刻持有 base64。
+  return Promise.all(
+    uploadedReferenceImages.map(async ({ name, content_type, file }) => ({
+      name,
+      content_type,
+      data_url: await readFileAsDataUrl(file),
+    })),
+  );
+}
+
 function createReferenceCard(reference, index) {
   const card = document.createElement('div');
-  card.className = 'relative aspect-square overflow-hidden rounded border border-slate-200 bg-slate-100 shadow-sm';
+  card.className = 'group relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-ink-850 transition hover:border-white/25';
   card.title = `${reference.name} · ${formatBytes(reference.size)}`;
 
   const preview = document.createElement('button');
   preview.type = 'button';
-  preview.className = 'absolute inset-0 z-10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-slate-500';
+  preview.className = 'absolute inset-0 z-10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/60';
   preview.setAttribute('aria-label', `预览参考图 ${index + 1}`);
   preview.addEventListener('click', (event) => {
     event.stopPropagation();
-    openLightbox('image', reference.data_url, `参考图 #${index + 1}`);
+    openLightbox('image', reference.previewUrl, `参考图 #${index + 1}`);
   });
 
   const image = document.createElement('img');
-  image.src = reference.data_url;
+  image.src = reference.previewUrl;
   image.alt = reference.name || `参考图 ${index + 1}`;
   image.className = 'h-full w-full object-cover';
+  image.setAttribute('loading', 'lazy');
+  image.setAttribute('decoding', 'async');
 
   const badge = document.createElement('span');
-  badge.className = 'absolute left-1 top-1 z-20 rounded bg-white/90 px-1.5 py-0.5 text-[10px] text-slate-700 shadow';
+  badge.className = 'absolute left-1.5 top-1.5 z-20 rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300 border border-white/10';
   badge.textContent = `#${index + 1}`;
 
   const remove = document.createElement('button');
   remove.type = 'button';
-  remove.className = 'absolute right-1 top-1 z-20 rounded bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-white hover:bg-rose-600 transition';
+  remove.className = 'absolute right-1.5 top-1.5 z-20 rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] text-zinc-300 border border-white/10 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-rose-500 hover:text-white hover:border-rose-400 transition';
   remove.textContent = '移除';
   remove.setAttribute('aria-label', `移除参考图 ${index + 1}`);
   remove.addEventListener('click', (event) => {
@@ -479,11 +525,12 @@ function stopTaskTimer() {
 }
 
 function statusPresentation(status) {
-  if (status === 'success') return { text: '已完成', classes: 'bg-emerald-100 text-emerald-700' };
-  if (status === 'error') return { text: '失败', classes: 'bg-rose-100 text-rose-700' };
-  if (status === 'cancelled') return { text: '已取消', classes: 'bg-slate-200 text-slate-600' };
-  if (status === 'queued') return { text: '排队中', classes: 'bg-amber-100 text-amber-700' };
-  return { text: '处理中', classes: 'bg-sky-100 text-sky-700' };
+  // 深色下用「半透明底 + 亮色文字 + 同色描边」，纯色底块会显得脏
+  if (status === 'success') return { text: '已完成', classes: 'bg-emerald-500/12 text-emerald-300 border border-emerald-500/25' };
+  if (status === 'error') return { text: '失败', classes: 'bg-rose-500/12 text-rose-300 border border-rose-500/25' };
+  if (status === 'cancelled') return { text: '已取消', classes: 'bg-white/[0.06] text-zinc-400 border border-white/10' };
+  if (status === 'queued') return { text: '排队中', classes: 'bg-amber-500/12 text-amber-300 border border-amber-500/25' };
+  return { text: '处理中', classes: 'bg-accent/12 text-accent-soft border border-accent/25' };
 }
 
 function mediaExtension(source, type) {
@@ -505,32 +552,35 @@ function mediaExtension(source, type) {
 function createMediaCard(source, type, index, entry) {
   const wrapper = document.createElement('div');
   wrapper.className = type === 'video'
-    ? 'relative border border-slate-200 rounded-lg overflow-hidden bg-slate-950 aspect-video'
-    : 'relative border border-slate-200 rounded-lg overflow-hidden bg-slate-100 aspect-square';
+    ? 'group relative border border-white/10 rounded-xl overflow-hidden bg-ink-950 aspect-video transition hover:border-accent/40'
+    : 'group relative border border-white/10 rounded-xl overflow-hidden checkerboard aspect-square transition hover:border-accent/40';
 
   const media = document.createElement(type === 'video' ? 'video' : 'img');
   media.src = source;
-  media.className = type === 'video' ? 'w-full h-full object-contain bg-slate-950' : 'w-full h-full object-cover';
+  media.className = type === 'video' ? 'w-full h-full object-contain bg-ink-950' : 'w-full h-full object-cover';
   if (type === 'video') {
     media.controls = true;
-    media.preload = 'metadata';
+    // preload='metadata' 会让历史里每个视频都发一次 range 请求；改为按需加载。
+    media.preload = 'none';
     media.playsInline = true;
   } else {
     media.alt = `生成图像 ${index + 1}`;
     media.referrerPolicy = 'no-referrer';
+    media.setAttribute('loading', 'lazy');
+    media.setAttribute('decoding', 'async');
   }
 
   const actions = document.createElement('div');
-  actions.className = 'absolute inset-x-0 bottom-0 z-20 bg-slate-900/60 text-white text-xs px-3 py-2 flex items-center justify-between gap-2';
+  actions.className = 'absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-ink-950/95 to-transparent pt-8 text-zinc-200 text-xs px-3 pb-2.5 flex items-center justify-between gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition';
 
   const preview = document.createElement('button');
   preview.type = 'button';
-  preview.className = 'truncate text-left hover:underline focus:outline-none focus:ring-2 focus:ring-white';
+  preview.className = 'truncate text-left hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/60 rounded transition';
   preview.textContent = type === 'video' ? `预览视频 #${index + 1}` : `预览图像 #${index + 1}`;
   preview.addEventListener('click', () => openLightbox(type, source, `${type === 'video' ? '视频' : '图像'} #${index + 1}`));
 
   const download = document.createElement('a');
-  download.className = 'bg-white/90 hover:bg-white text-slate-800 text-xs px-2.5 py-1 rounded shadow font-medium transition shrink-0';
+  download.className = 'bg-white/10 hover:bg-accent hover:text-ink-950 text-zinc-100 text-xs px-2.5 py-1 rounded-md border border-white/15 font-medium transition shrink-0 backdrop-blur-sm';
   download.href = source;
   download.download = `${type}_${entry.createdAt}_${index + 1}.${mediaExtension(source, type)}`;
   download.textContent = '下载';
@@ -543,17 +593,17 @@ function createMediaCard(source, type, index, entry) {
 function createHistoryEntry(entry) {
   const article = document.createElement('article');
   article.dataset.entryId = entry.id;
-  article.className = 'border border-slate-200 rounded-lg bg-white p-4 shadow-sm animate-fade-in';
+  article.className = 'border border-white/[0.07] rounded-xl bg-ink-850/40 p-4 animate-fade-in transition hover:border-white/[0.12]';
 
   const header = document.createElement('div');
   header.className = 'flex items-start justify-between gap-3';
   const summary = document.createElement('div');
   summary.className = 'min-w-0';
   const title = document.createElement('h3');
-  title.className = 'text-sm font-semibold text-slate-800';
+  title.className = 'text-sm font-semibold text-zinc-100';
   title.textContent = `${PROTOCOL_CONFIG[entry.protocol].isVideo ? '视频' : '图像'}任务 · ${entry.mode === 'edit' ? '参考图模式' : '生成模式'}`;
   const metadata = document.createElement('p');
-  metadata.className = 'mt-1 text-[11px] text-slate-400 break-all';
+  metadata.className = 'mt-1 text-[11px] font-mono text-zinc-600 break-all';
   metadata.append(`${[entry.model, entry.size, `n=${entry.count}`].filter(Boolean).join(' · ')} · `);
   const elapsed = document.createElement('span');
   elapsed.dataset.entryElapsed = '';
@@ -569,20 +619,20 @@ function createHistoryEntry(entry) {
   header.append(summary, status);
 
   const prompt = document.createElement('p');
-  prompt.className = 'mt-3 text-xs text-slate-600 whitespace-pre-wrap break-words';
+  prompt.className = 'mt-3 text-xs text-zinc-400 whitespace-pre-wrap break-words leading-relaxed';
   prompt.textContent = entry.prompt;
   article.append(header, prompt);
 
   if (entry.status === 'queued' || entry.status === 'running') {
     const pending = document.createElement('div');
-    pending.className = 'mt-4 border border-dashed border-sky-200 bg-sky-50/50 rounded-lg min-h-28 flex items-center justify-center text-xs text-sky-700';
+    pending.className = 'mt-4 border border-dashed border-accent/25 bg-accent/[0.05] rounded-xl min-h-28 flex items-center justify-center text-xs text-accent-soft';
     pending.textContent = '异步任务处理中，结果会自动更新';
     article.append(pending);
   } else if (entry.status === 'error' || entry.status === 'cancelled') {
     const message = document.createElement('pre');
     message.className = entry.status === 'error'
-      ? 'mt-4 whitespace-pre-wrap text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded p-3'
-      : 'mt-4 whitespace-pre-wrap text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded p-3';
+      ? 'mt-4 whitespace-pre-wrap text-xs text-rose-200 bg-rose-500/[0.07] border border-rose-500/20 rounded-lg p-3 leading-relaxed'
+      : 'mt-4 whitespace-pre-wrap text-xs text-zinc-400 bg-white/[0.03] border border-white/10 rounded-lg p-3 leading-relaxed';
     message.textContent = entry.errorMessage || (entry.status === 'cancelled' ? '任务已取消。' : '任务失败。');
     article.append(message);
   } else {
@@ -596,7 +646,7 @@ function createHistoryEntry(entry) {
       mediaItems.forEach((item, index) => grid.append(createMediaCard(item.source, item.type, index, entry)));
     } else {
       const empty = document.createElement('p');
-      empty.className = 'col-span-full text-xs text-slate-500 border border-dashed border-slate-200 rounded-lg p-6 text-center';
+      empty.className = 'col-span-full text-xs text-zinc-500 border border-dashed border-white/10 rounded-xl p-6 text-center';
       empty.textContent = '任务完成，但接口没有返回媒体。';
       grid.append(empty);
     }
@@ -605,16 +655,54 @@ function createHistoryEntry(entry) {
   return article;
 }
 
+// index.html 里的初始空状态含一个 SVG 图标；克隆它，避免"清空历史"后退化成纯文字。
+const emptyHistoryTemplate = document.getElementById('history-empty')?.cloneNode(true) || null;
+
+function buildEmptyHistory() {
+  if (emptyHistoryTemplate) return emptyHistoryTemplate.cloneNode(true);
+  const empty = document.createElement('div');
+  empty.id = 'history-empty';
+  empty.className = 'border border-dashed border-white/10 rounded-2xl min-h-[18rem] flex flex-col items-center justify-center text-zinc-500 bg-ink-950/40';
+  empty.textContent = '暂无任务记录';
+  return empty;
+}
+
+// 决定一条历史记录的 DOM 是否需要重建。elapsed 由计时器就地更新（见 startTaskTimer），
+// 所以不参与签名，否则每秒都会重建整个列表。
+function historyEntrySignature(entry) {
+  return [
+    entry.status,
+    entry.errorMessage || '',
+    entry.jobId || '',
+    entry.images.join(' '),
+    entry.videos.join(' '),
+  ].join('|');
+}
+
 function renderHistory() {
   if (!historyEntries.length) {
-    const empty = document.createElement('div');
-    empty.id = 'history-empty';
-    empty.className = 'border border-dashed border-slate-200 rounded-lg min-h-48 flex flex-col items-center justify-center text-slate-400 bg-slate-50/30';
-    empty.textContent = '暂无任务记录';
-    els['history-list'].replaceChildren(empty);
+    historyNodes.clear();
+    els['history-list'].replaceChildren(buildEmptyHistory());
     return;
   }
-  els['history-list'].replaceChildren(...historyEntries.map(createHistoryEntry));
+
+  // 复用未变化的节点：replaceChildren 移动既有节点而不是重建，
+  // 因此 <img>/<video> 不会重新发起请求，也不会闪烁。
+  const nodes = historyEntries.map((entry) => {
+    const signature = historyEntrySignature(entry);
+    const cached = historyNodes.get(entry.id);
+    if (cached && cached.signature === signature) return cached.node;
+    const node = createHistoryEntry(entry);
+    historyNodes.set(entry.id, { node, signature });
+    return node;
+  });
+
+  const liveIds = new Set(historyEntries.map((entry) => entry.id));
+  for (const id of Array.from(historyNodes.keys())) {
+    if (!liveIds.has(id)) historyNodes.delete(id);
+  }
+
+  els['history-list'].replaceChildren(...nodes);
 }
 
 function updateGlobalMeta(entry) {
@@ -626,7 +714,7 @@ function updateGlobalMeta(entry) {
   els['meta-status'].textContent = statusPresentation(entry.status).text;
 }
 
-function createPayload() {
+async function createPayload() {
   const config = getProtocolConfig();
   const count = clampInt(els.image_count.value, 1, config.maxOutputs, 1);
   const timeout = clampInt(els.timeout.value, 5, 600, 500);
@@ -648,11 +736,7 @@ function createPayload() {
     payload.poll_interval = 5;
   }
   if (currentMode === 'edit') {
-    payload.edit_images = uploadedReferenceImages.map(({ name, content_type, data_url }) => ({
-      name,
-      content_type,
-      data_url,
-    }));
+    payload.edit_images = await buildEditImagePayloads();
   }
   return payload;
 }
@@ -686,11 +770,17 @@ function abortableDelay(milliseconds, signal) {
       reject(new DOMException('Aborted', 'AbortError'));
       return;
     }
-    const timer = window.setTimeout(resolve, milliseconds);
-    signal.addEventListener('abort', () => {
+    // { once: true } 只在 abort 真的触发时才移除监听器。正常超时返回的路径上
+    // 监听器会留在 signal 上，长任务轮询几百次就会堆积几百个闭包，必须手动摘除。
+    const onAbort = () => {
       window.clearTimeout(timer);
       reject(new DOMException('Aborted', 'AbortError'));
-    }, { once: true });
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -713,7 +803,12 @@ async function pollJob(task, timeoutSeconds) {
     updateGlobalMeta(task.entry);
     setStatus(task.entry.status === 'queued' ? '任务已创建，正在排队...' : '任务正在执行，等待媒体结果...');
   }
-  throw new Error(`等待任务超过 ${timeoutSeconds + 30} 秒，已停止轮询`);
+  // 本地放弃等待时必须通知服务端，否则任务会继续占用 worker 槽位、
+  // 并把没人会读取的资产一直保留到 TTL 过期。
+  const cancelled = await requestServerCancellation(task.jobId);
+  throw new Error(
+    `等待任务超过 ${timeoutSeconds + 30} 秒，已停止轮询${cancelled ? '，服务端任务已取消' : '，服务端未确认取消'}`,
+  );
 }
 
 async function requestServerCancellation(jobId) {
@@ -742,13 +837,20 @@ async function cancelActiveTask() {
   task.cancelRequested = true;
   task.entry.status = 'cancelled';
   task.entry.elapsedMs = Date.now() - task.entry.startedAt;
-  task.controller.abort();
   els['cancel-btn'].disabled = true;
   els['cancel-btn'].textContent = '正在取消...';
-  const serverCancelled = await requestServerCancellation(task.jobId);
-  task.entry.errorMessage = serverCancelled
-    ? '任务已在服务端取消。'
-    : '已停止本地等待；服务端未确认取消，任务可能仍在后台运行。';
+  // 先挂上取消 promise 再 abort：abort() 会同步 reject 轮询，于是 submitGeneration
+  // 的 finally 会在下一个微任务就把按钮恢复成"取消任务"，把上面这行刚设置的
+  // "正在取消..."立刻抹掉——而服务端取消请求还有最多 3 秒才回来。
+  // finally 需要能看到这个 promise 并等它结束。
+  task.cancelPromise = requestServerCancellation(task.jobId).then((serverCancelled) => {
+    task.entry.errorMessage = serverCancelled
+      ? '任务已在服务端取消。'
+      : '已停止本地等待；服务端未确认取消，任务可能仍在后台运行。';
+    return serverCancelled;
+  });
+  task.controller.abort();
+  await task.cancelPromise;
   renderHistory();
   if (activeTask === task || activeTask === null) {
     updateGlobalMeta(task.entry);
@@ -758,10 +860,25 @@ async function cancelActiveTask() {
 
 async function submitGeneration(event) {
   event.preventDefault();
-  if (activeTask) return;
+  // createPayload 现在要读取参考图文件（异步），在 activeTask 被赋值之前存在一个窗口，
+  // 期间连点提交会并发起两个任务，因此需要额外的提交中标记。
+  if (activeTask || isPreparingSubmission) return;
   hideError();
   persistSettings();
-  const payload = createPayload();
+
+  isPreparingSubmission = true;
+  let payload;
+  try {
+    payload = await createPayload();
+  } catch (error) {
+    showError('无法提交任务', error instanceof Error ? error.message : '读取参考图失败');
+    setStatus('读取参考图失败，请重新选择');
+    return;
+  } finally {
+    isPreparingSubmission = false;
+  }
+  if (activeTask) return;
+
   const validationError = validatePayload(payload);
   if (validationError) {
     showError('无法提交任务', validationError);
@@ -789,7 +906,7 @@ async function submitGeneration(event) {
     errorMessage: '',
   };
   historyEntries = [entry, ...historyEntries].slice(0, HISTORY_LIMIT);
-  const task = { entry, controller: new AbortController(), jobId: '', cancelRequested: false };
+  const task = { entry, controller: new AbortController(), jobId: '', cancelRequested: false, cancelPromise: null };
   activeTask = task;
   setLoadingState(true);
   els['request-hint'].classList.remove('hidden');
@@ -836,6 +953,15 @@ async function submitGeneration(event) {
   } finally {
     stopTaskTimer();
     els['request-hint'].classList.add('hidden');
+    // 等服务端取消请求真正结束，再恢复按钮，否则"正在取消..."会被立刻覆盖。
+    // requestServerCancellation 自身不会 reject，catch 只是兜底。
+    if (task.cancelPromise) {
+      try {
+        await task.cancelPromise;
+      } catch {
+        // 取消结果已写入 entry.errorMessage，这里无需额外处理。
+      }
+    }
     updateGlobalMeta(entry);
     renderHistory();
     if (activeTask === task) activeTask = null;
@@ -868,7 +994,11 @@ function openLightbox(type, source, title) {
 
 function closeLightbox() {
   if (els.lightbox.classList.contains('hidden')) return;
+  // 只 pause 不清 src：远程 mp4 关闭后仍会继续缓冲，data URL 预览也会一直保持解码状态。
   els['lightbox-video'].pause();
+  els['lightbox-video'].removeAttribute('src');
+  els['lightbox-video'].load();
+  els['lightbox-image'].removeAttribute('src');
   els.lightbox.classList.add('hidden');
   document.body.classList.remove('overflow-hidden');
   if (lastFocusedElement instanceof HTMLElement) lastFocusedElement.focus();
@@ -914,11 +1044,8 @@ function bindEvents() {
     }
   });
   els['file-input'].addEventListener('change', async (event) => {
-    hideError();
     try {
-      await addReferenceFiles(Array.from(event.target.files || []));
-    } catch (error) {
-      showError('读取参考图失败', error instanceof Error ? error.message : String(error));
+      await handleIncomingFiles(event.target.files);
     } finally {
       event.target.value = '';
     }
@@ -940,9 +1067,10 @@ function bindEvents() {
       els['reference-dropzone'].classList.remove('dropzone-active');
     });
   }
-  els['reference-dropzone'].addEventListener('drop', async (event) => {
-    hideError();
-    await addReferenceFiles(Array.from(event.dataTransfer?.files || []));
+  els['reference-dropzone'].addEventListener('drop', (event) => {
+    // 走同一个 helper：原来的 drop 分支没有 try/catch，
+    // FileReader 失败会变成未处理的 promise rejection，用户什么也看不到。
+    void handleIncomingFiles(event.dataTransfer?.files);
   });
 
   for (const id of ['base_url', 'model', 'size', 'image_count', 'timeout', 'video_resolution', 'duration']) {

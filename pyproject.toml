@@ -27,5 +27,5 @@ openai-image-client-mcp = "mcp_server:main"
 openai-image-client-mcp-http = "mcp_http_server:main"
 
 [tool.setuptools]
-packages = ["openai_image_client"]
+packages = ["image_client_core", "openai_image_client"]
 py-modules = ["mcp_server", "mcp_http_server", "web_app"]

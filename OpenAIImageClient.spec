@@ -11,7 +11,14 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[(str(ROOT / "web"), "web")],
-    hiddenimports=[],
+    # web_app 现在从 image_client_core 导入共享逻辑；PyInstaller 能顺着 import 找到它，
+    # 这里显式声明以防将来改成延迟导入后被漏掉。
+    hiddenimports=[
+        "image_client_core",
+        "image_client_core.endpoints",
+        "image_client_core.models",
+        "image_client_core.responses",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

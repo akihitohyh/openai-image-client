@@ -3,22 +3,22 @@ from __future__ import annotations
 
 import argparse
 import base64
-import binascii
 from concurrent.futures import Future, ThreadPoolExecutor
 import hmac
 import ipaddress
 import json
-import math
 import mimetypes
 import os
 import shutil
 import socket
+import stat
 import threading
 import sys
 import tempfile
 import time
 import uuid
 import webbrowser
+from collections.abc import Callable
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import ParseResult, urljoin, urlparse
@@ -26,6 +26,35 @@ from urllib.parse import ParseResult, urljoin, urlparse
 import requests
 from requests import RequestException
 from requests.adapters import HTTPAdapter
+
+from image_client_core.endpoints import (
+    candidate_endpoints,
+    video_poll_endpoint_from_generation,
+)
+from image_client_core.models import (
+    GROK_RESOLUTION_VALUES,
+    GROK_RESPONSE_FORMAT_VALUES,
+    GROK_SUPPORTED_RATIOS,
+    GROK_VIDEO_RESOLUTION_VALUES,
+    GROK_VIDEO_SUPPORTED_RATIOS,
+    grok_aspect_ratio_from_size,
+    grok_resolution_from_size,
+    grok_video_aspect_ratio_from_size,
+    grok_video_resolution_from_size,
+    is_gpt_image_2,
+    is_grok_image_model,
+    is_grok_video_model,
+)
+from image_client_core.responses import (
+    decode_base64_limited,
+    exception_diagnostic,
+    likely_gateway_or_upstream_error,
+    likely_non_retryable_client_error,
+    preview_response_body,
+    read_limited_response,
+    response_diagnostic,
+    response_json_limited,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -39,62 +68,9 @@ def app_root() -> Path:
 
 ROOT = app_root()
 WEB_ROOT = ROOT / "web"
-KNOWN_API_ENDPOINTS = (
-    "/v1/images/generations",
-    "/images/generations",
-    "/v1/images/edits",
-    "/images/edits",
-    "/v1/images/variations",
-    "/images/variations",
-    "/v1/videos/generations",
-    "/videos/generations",
-    "/v1/videos/edits",
-    "/videos/edits",
-    "/v1/videos/extensions",
-    "/videos/extensions",
-)
 OPENAI_IMAGE_EDIT_FILE_FIELD = "image"
 OPENAI_IMAGE_EDIT_ARRAY_FIELD = "image[]"
-GROK_IMAGE_GENERATION_MODELS = {
-    "grok-imagine-edit",
-    "grok-imagine-image",
-    "grok-imagine-image-lite",
-    "grok-imagine-image-pro",
-    "grok-imagine-image-quality",
-}
-GROK_VIDEO_MODELS = {
-    "grok-imagine-video",
-    "grok-imagine-video-1.5",
-}
 PROTOCOL_VALUES = {"auto", "openai", "grok"}
-GROK_RESOLUTION_VALUES = {"", "1k", "2k"}
-GROK_RESPONSE_FORMAT_VALUES = {"", "url", "b64_json"}
-GROK_VIDEO_RESOLUTION_VALUES = {"", "480p", "720p", "1080p"}
-GROK_SUPPORTED_RATIOS = {
-    "1:1",
-    "16:9",
-    "9:16",
-    "4:3",
-    "3:4",
-    "3:2",
-    "2:3",
-    "2:1",
-    "1:2",
-    "19.5:9",
-    "9:19.5",
-    "20:9",
-    "9:20",
-    "auto",
-}
-GROK_VIDEO_SUPPORTED_RATIOS = {
-    "1:1",
-    "16:9",
-    "9:16",
-    "4:3",
-    "3:4",
-    "3:2",
-    "2:3",
-}
 JOB_TTL_SECONDS = 60 * 60
 MAX_JOB_RUNTIME_SECONDS = 15 * 60
 MAX_CONCURRENT_JOBS = 2
@@ -122,7 +98,6 @@ MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_REFERENCE_IMAGES_BYTES = 30 * 1024 * 1024
 MAX_REMOTE_MEDIA_BYTES = 20 * 1024 * 1024
 MAX_GENERATED_MEDIA_BYTES = 30 * 1024 * 1024
-MAX_UPSTREAM_JSON_BYTES = 32 * 1024 * 1024
 MAX_SSE_EVENT_BYTES = 28 * 1024 * 1024
 MAX_RETAINED_RAW_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
@@ -131,11 +106,38 @@ MAX_GROK_VIDEO_REFERENCE_IMAGES = 7
 MAX_EMBED_ORIGINS = 32
 MAX_EMBED_ORIGINS_CHARS = 4096
 TERMINAL_JOB_STATUSES = {"success", "error", "cancelled"}
+ASSET_CACHE_SECONDS = 3600
 ASSET_ROOT = Path(tempfile.gettempdir()) / "openai-image-client-assets"
 
 
 class JobQueueFullError(RuntimeError):
     pass
+
+
+class JobCancelledError(RuntimeError):
+    """任务在执行过程中被取消或超过最大运行时间。"""
+
+
+CancelCheck = Callable[[], bool] | None
+CANCEL_POLL_SLICE_SECONDS = 0.5
+
+
+def raise_if_cancelled(should_cancel: CancelCheck) -> None:
+    if should_cancel is not None and should_cancel():
+        raise JobCancelledError("任务已取消")
+
+
+def cancellable_sleep(duration: float, should_cancel: CancelCheck) -> None:
+    """分片休眠，使取消请求最多在 CANCEL_POLL_SLICE_SECONDS 内生效。"""
+    raise_if_cancelled(should_cancel)
+    if should_cancel is None:
+        time.sleep(duration)
+        return
+    remaining = duration
+    while remaining > 0:
+        time.sleep(min(CANCEL_POLL_SLICE_SECONDS, remaining))
+        remaining -= CANCEL_POLL_SLICE_SECONDS
+        raise_if_cancelled(should_cancel)
 
 
 def env_truthy(name: str) -> bool:
@@ -302,6 +304,9 @@ def _request_authority(parsed: ParseResult) -> str:
     return f"{host_text}:{parsed.port}" if parsed.port is not None else host_text
 
 
+# 把域名解析一次后钉死到具体 IP 再建连接，TLS 仍按原域名校验。
+# 没有这一层的话，SSRF 校验是 TOCTOU：validate 解析一次、requests 再解析一次，
+# 一个短 TTL 的域名先返回公网 IP、再返回 127.0.0.1/169.254.169.254 就能绕过。
 class PinnedDNSHTTPAdapter(HTTPAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -373,28 +378,34 @@ class PinnedDNSHTTPAdapter(HTTPAdapter):
         )
 
 
-SAFE_HTTP_SESSION_LOCAL = threading.local()
-
-
-def _safe_http_session() -> requests.Session:
-    session = getattr(SAFE_HTTP_SESSION_LOCAL, "session", None)
-    if session is None:
-        session = requests.Session()
-        session.trust_env = False
-        session.mount("http://", PinnedDNSHTTPAdapter())
-        session.mount("https://", PinnedDNSHTTPAdapter())
-        SAFE_HTTP_SESSION_LOCAL.session = session
-    return session
-
-
-def _request_with_pinned_dns(method: str, url: str, **kwargs) -> requests.Response:
-    return _safe_http_session().request(method, url, **kwargs)
-
-
 def _url_origin(value: str) -> tuple[str, str, int]:
     parsed = urlparse(value)
     default_port = 443 if parsed.scheme.lower() == "https" else 80
     return parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."), parsed.port or default_port
+
+
+_SESSION_LOCAL = threading.local()
+
+
+def outbound_session() -> requests.Session:
+    """每线程复用一个挂了 DNS 钉住 adapter 的 Session。
+
+    复用的作用：视频轮询会对同一主机发起几十次请求，而 requests.request() 每次都会
+    新建并丢弃一个 Session，也就是每次都重做一遍 TLS 握手。Session 不保证线程安全，
+    所以按线程隔离。
+
+    adapter 必须是 PinnedDNSHTTPAdapter：普通 adapter 会让 requests 重新解析域名，
+    使 SSRF 校验退化成 TOCTOU。trust_env=False 则确保出站不会被环境代理改道。
+    """
+    session = getattr(_SESSION_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.trust_env = False
+        # 重定向由 safe_http_request 自己按 SSRF 规则逐跳校验，这里不放行。
+        session.mount("https://", PinnedDNSHTTPAdapter())
+        session.mount("http://", PinnedDNSHTTPAdapter())
+        _SESSION_LOCAL.session = session
+    return session
 
 
 def safe_http_request(method: str, url: str, *, allow_cross_origin: bool = False, **kwargs) -> requests.Response:
@@ -402,9 +413,10 @@ def safe_http_request(method: str, url: str, *, allow_cross_origin: bool = False
     current_url = validate_outbound_url(url)
     request_kwargs = dict(kwargs)
     request_kwargs["allow_redirects"] = False
+    session = outbound_session()
 
     for redirect_count in range(MAX_REDIRECTS + 1):
-        response = _request_with_pinned_dns(current_method, current_url, **request_kwargs)
+        response = session.request(current_method, current_url, **request_kwargs)
         if response.status_code not in {301, 302, 303, 307, 308}:
             return response
 
@@ -433,49 +445,6 @@ def safe_http_request(method: str, url: str, *, allow_cross_origin: bool = False
         current_url = target
 
     raise RequestException("重定向处理失败")
-
-
-def read_limited_response(response: requests.Response, limit: int) -> bytes:
-    cached = getattr(response, "_image_client_body", None)
-    if isinstance(cached, bytes):
-        if len(cached) > limit:
-            raise ValueError(f"上游响应超过 {limit} 字节限制")
-        return cached
-
-    raw_length = response.headers.get("Content-Length", "").strip()
-    if raw_length:
-        try:
-            content_length = int(raw_length)
-        except ValueError:
-            content_length = 0
-        if content_length > limit:
-            response.close()
-            raise ValueError(f"上游响应超过 {limit} 字节限制")
-
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in response.iter_content(chunk_size=64 * 1024):
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > limit:
-            response.close()
-            raise ValueError(f"上游响应超过 {limit} 字节限制")
-        chunks.append(chunk)
-    body = b"".join(chunks)
-    setattr(response, "_image_client_body", body)
-    return body
-
-
-def response_json_limited(response: requests.Response, limit: int = MAX_UPSTREAM_JSON_BYTES) -> dict:
-    body = read_limited_response(response, limit)
-    try:
-        data = json.loads(body.decode(getattr(response, "encoding", None) or "utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("上游返回的 JSON 不合法") from exc
-    if not isinstance(data, dict):
-        raise ValueError("上游返回的 JSON 顶层必须是对象")
-    return data
 
 
 def compact_raw_response(data: dict) -> dict:
@@ -512,49 +481,6 @@ def compact_raw_response(data: dict) -> dict:
     return compact
 
 
-def normalize_base_url(base_url: str) -> str:
-    return (base_url or "").strip().rstrip("/")
-
-
-def join_url(base_url: str, suffix: str) -> str:
-    return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
-
-
-def candidate_endpoints(base_url: str, route: str) -> list[str]:
-    value = normalize_base_url(base_url)
-    if not value:
-        return []
-
-    for endpoint in KNOWN_API_ENDPOINTS:
-        if value.endswith(endpoint):
-            prefix = value[: -len(endpoint)]
-            if endpoint.startswith("/v1/"):
-                return [join_url(prefix, f"v1/{route}")]
-            return [join_url(prefix, route)]
-
-    if value.endswith("/v1"):
-        return [join_url(value, route)]
-    return [
-        join_url(value, f"v1/{route}"),
-        join_url(value, route),
-    ]
-
-
-def is_gpt_image_2(model: str) -> bool:
-    value = str(model or "").strip().lower()
-    return value == "gpt-image-2" or value.startswith("gpt-image-2-")
-
-
-def is_grok_image_model(model: str) -> bool:
-    value = str(model or "").strip().lower()
-    return value == "grok-imagine" or any(value == item or value.startswith(f"{item}-") for item in GROK_IMAGE_GENERATION_MODELS)
-
-
-def is_grok_video_model(model: str) -> bool:
-    value = str(model or "").strip().lower()
-    return any(value == item or value.startswith(f"{item}-") for item in GROK_VIDEO_MODELS)
-
-
 def resolve_image_protocol(protocol: str, model: str, base_url: str) -> str:
     value = str(protocol or "auto").strip().lower()
     if value not in PROTOCOL_VALUES:
@@ -567,190 +493,8 @@ def resolve_image_protocol(protocol: str, model: str, base_url: str) -> str:
     return "openai"
 
 
-def parse_size(size: str) -> tuple[int, int] | None:
-    value = str(size or "").strip().lower()
-    if "x" not in value:
-        return None
-    left, right = value.split("x", 1)
-    try:
-        width = int(left)
-        height = int(right)
-    except ValueError:
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return width, height
-
-
-def closest_grok_ratio(width: int, height: int) -> str:
-    exact_gcd = math.gcd(width, height)
-    exact_ratio = f"{width // exact_gcd}:{height // exact_gcd}"
-    if exact_ratio in GROK_SUPPORTED_RATIOS:
-        return exact_ratio
-
-    current = width / height
-    best_ratio = "1:1"
-    best_delta = float("inf")
-    for candidate in GROK_SUPPORTED_RATIOS - {"auto"}:
-        left, right = candidate.split(":", 1)
-        candidate_value = float(left) / float(right)
-        delta = abs(current - candidate_value)
-        if delta < best_delta:
-            best_ratio = candidate
-            best_delta = delta
-    return best_ratio
-
-
-def grok_aspect_ratio_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "1:1"
-    width, height = parsed
-    return closest_grok_ratio(width, height)
-
-
-def grok_resolution_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "1k"
-    return "2k" if max(parsed) > 1536 else "1k"
-
-
-def closest_grok_video_ratio(width: int, height: int) -> str:
-    exact_gcd = math.gcd(width, height)
-    exact_ratio = f"{width // exact_gcd}:{height // exact_gcd}"
-    if exact_ratio in GROK_VIDEO_SUPPORTED_RATIOS:
-        return exact_ratio
-
-    current = width / height
-    best_ratio = "16:9"
-    best_delta = float("inf")
-    for candidate in GROK_VIDEO_SUPPORTED_RATIOS:
-        left, right = candidate.split(":", 1)
-        candidate_value = float(left) / float(right)
-        delta = abs(current - candidate_value)
-        if delta < best_delta:
-            best_ratio = candidate
-            best_delta = delta
-    return best_ratio
-
-
-def grok_video_aspect_ratio_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "16:9"
-    width, height = parsed
-    return closest_grok_video_ratio(width, height)
-
-
-def grok_video_resolution_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "480p"
-    long_edge = max(parsed)
-    if long_edge > 1536:
-        return "1080p"
-    if long_edge > 720:
-        return "720p"
-    return "480p"
-
-
-def preview_response_body(response: requests.Response, limit: int = 300) -> str:
-    content_type = response.headers.get("Content-Type", "").lower()
-    if "application/json" in content_type:
-        try:
-            data = response_json_limited(response, min(MAX_UPSTREAM_JSON_BYTES, 64 * 1024))
-        except (ValueError, TypeError):
-            pass
-        else:
-            if isinstance(data, dict):
-                message = data.get("message") or data.get("error")
-                if isinstance(message, dict):
-                    message = message.get("message")
-                if message:
-                    return str(message)[:limit]
-                return json.dumps(data, ensure_ascii=False)[:limit]
-    try:
-        body = read_limited_response(response, 64 * 1024)
-    except ValueError:
-        return "上游错误响应过大"
-    return body.decode(getattr(response, "encoding", None) or "utf-8", errors="replace")[:limit].replace("\n", " ").strip()
-
-
-def json_error_type(response: requests.Response) -> str:
-    content_type = response.headers.get("Content-Type", "").lower()
-    if "application/json" not in content_type:
-        return ""
-    try:
-        data = response_json_limited(response, min(MAX_UPSTREAM_JSON_BYTES, 64 * 1024))
-    except ValueError:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    error = data.get("error")
-    if isinstance(error, dict):
-        return str(error.get("type", ""))
-    return str(data.get("type", ""))
-
-
-def response_diagnostic(endpoint: str, response: requests.Response) -> str:
-    content_type = response.headers.get("Content-Type", "") or "unknown"
-    request_id = response.headers.get("x-request-id") or response.headers.get("cf-ray")
-    error_type = json_error_type(response)
-    parts = [
-        f"- {endpoint} -> HTTP {response.status_code}",
-        f"Content-Type: {content_type}",
-    ]
-    if request_id:
-        parts.append(f"Request-ID: {request_id}")
-    if error_type:
-        parts.append(f"Error-Type: {error_type}")
-    body_preview = preview_response_body(response)
-    if body_preview:
-        parts.append(f"Body: {body_preview}")
-    return ", ".join(parts)
-
-
-def exception_diagnostic(endpoint: str, exc: BaseException) -> str:
-    return f"- {endpoint} -> 请求异常: {type(exc).__name__}: {exc}"
-
-
-def likely_gateway_or_upstream_error(response: requests.Response) -> bool:
-    content_type = response.headers.get("Content-Type", "").lower()
-    error_type = json_error_type(response)
-    return (
-        response.status_code >= 500
-        or response.status_code in {502, 503, 504}
-        or "upstream" in error_type
-        or (response.status_code >= 500 and "text/html" in content_type)
-    )
-
-
-def likely_non_retryable_client_error(response: requests.Response) -> bool:
-    content_type = response.headers.get("Content-Type", "").lower()
-    return (
-        400 <= response.status_code < 500
-        and response.status_code not in {404, 405}
-        and "text/html" not in content_type
-    )
-
-
 def data_url_from_bytes(data: bytes, mime: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-
-
-def decode_base64_limited(encoded: str, limit: int, label: str) -> bytes:
-    value = str(encoded or "").strip()
-    max_encoded_length = 4 * math.ceil(limit / 3) + 4
-    if len(value) > max_encoded_length:
-        raise ValueError(f"{label} 超过 {limit} 字节限制")
-    try:
-        decoded = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError(f"{label} 不是合法的 Base64 数据") from exc
-    if len(decoded) > limit:
-        raise ValueError(f"{label} 超过 {limit} 字节限制")
-    return decoded
 
 
 def data_url_payload_size(value: str) -> int:
@@ -926,6 +670,7 @@ def request_image_api(
     json_body: dict | None = None,
     form_data: dict | None = None,
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+    should_cancel: CancelCheck = None,
 ) -> dict:
     endpoints = candidate_endpoints(base_url, route)
     if not endpoints:
@@ -941,6 +686,7 @@ def request_image_api(
     started_at = time.time()
 
     for endpoint in endpoints:
+        raise_if_cancelled(should_cancel)
         try:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -1079,13 +825,6 @@ def request_image_stream(
     )
 
 
-def video_poll_endpoint_from_generation(endpoint: str, request_id: str) -> str:
-    value = endpoint.rstrip("/")
-    if value.endswith("/generations"):
-        return f"{value.rsplit('/', 1)[0]}/{request_id}"
-    return join_url(value, f"videos/{request_id}")
-
-
 def extract_video_urls(data: dict) -> list[str]:
     videos: list[str] = []
 
@@ -1121,6 +860,7 @@ def request_grok_video_api(
     json_body: dict,
     count: int = 1,
     poll_interval: int = 5,
+    should_cancel: CancelCheck = None,
 ) -> dict:
     endpoints = candidate_endpoints(base_url, "videos/generations")
     if not endpoints:
@@ -1143,6 +883,7 @@ def request_grok_video_api(
         task_completed = False
 
         for endpoint in endpoints:
+            raise_if_cancelled(should_cancel)
             try:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
@@ -1200,7 +941,7 @@ def request_grok_video_api(
                                 ensure_ascii=False,
                             )
                         )
-                    time.sleep(poll_delay)
+                    cancellable_sleep(poll_delay, should_cancel)
                     try:
                         polled = safe_http_request(
                             "GET",
@@ -1506,7 +1247,7 @@ def is_video_payload(payload: dict, model: str | None = None) -> bool:
     return mode == "video" or is_grok_video_model(value)
 
 
-def generate_videos(payload: dict) -> dict:
+def generate_videos(payload: dict, *, should_cancel: CancelCheck = None) -> dict:
     base_url = str(payload.get("base_url", "")).strip()
     api_key = str(payload.get("api_key", "")).strip()
     prompt = str(payload.get("prompt", "")).strip()
@@ -1530,10 +1271,11 @@ def generate_videos(payload: dict) -> dict:
         json_body=request_body,
         count=video_count,
         poll_interval=poll_interval,
+        should_cancel=should_cancel,
     )
 
 
-def generate_images(payload: dict) -> dict:
+def generate_images(payload: dict, *, should_cancel: CancelCheck = None) -> dict:
     base_url = str(payload.get("base_url", "")).strip()
     api_key = str(payload.get("api_key", "")).strip()
     prompt = str(payload.get("prompt", "")).strip()
@@ -1563,6 +1305,7 @@ def generate_images(payload: dict) -> dict:
         timeout,
         "images/generations",
         json_body=request_body,
+        should_cancel=should_cancel,
     )
 
 
@@ -1652,7 +1395,7 @@ def build_edit_image_files(
     ]
 
 
-def edit_images(payload: dict) -> dict:
+def edit_images(payload: dict, *, should_cancel: CancelCheck = None) -> dict:
     base_url = str(payload.get("base_url", "")).strip()
     api_key = str(payload.get("api_key", "")).strip()
     prompt = str(payload.get("prompt", "")).strip()
@@ -1673,6 +1416,7 @@ def edit_images(payload: dict) -> dict:
             timeout,
             "images/edits",
             json_body=request_body,
+            should_cancel=should_cancel,
         )
 
     request_data = {
@@ -1691,6 +1435,7 @@ def edit_images(payload: dict) -> dict:
         "images/edits",
         form_data=request_data,
         files=files,
+        should_cancel=should_cancel,
     )
 
 
@@ -1749,17 +1494,25 @@ def build_stream_request(payload: dict) -> tuple[str, str, int, str, dict | None
     return base_url, api_key, timeout, "images/edits", None, request_data, files
 
 
-def process_request_payload(payload: dict) -> dict:
-    validate_request_payload(payload)
+def process_request_payload(
+    payload: dict,
+    *,
+    should_cancel: CancelCheck = None,
+    already_validated: bool = False,
+) -> dict:
+    # 校验会把每张参考图完整 base64 解码一遍以统计大小（上限 30MB）。
+    # 异步任务在入队时已经校验过，重复校验等于白解一次。
+    if not already_validated:
+        validate_request_payload(payload)
     mode = str(payload.get("mode", "generate")).strip().lower() or "generate"
     raw_model = str(payload.get("model", "")).strip()
     if is_video_payload(payload, raw_model):
-        return generate_videos(payload)
+        return generate_videos(payload, should_cancel=should_cancel)
     if mode == "edit":
-        return edit_images(payload)
+        return edit_images(payload, should_cancel=should_cancel)
     if mode != "generate":
         raise ValueError("不支持的模式")
-    return generate_images(payload)
+    return generate_images(payload, should_cancel=should_cancel)
 
 
 def validate_request_payload(payload: dict) -> None:
@@ -1916,6 +1669,16 @@ def create_async_job(payload: dict) -> str:
             "deadline_at": now + runtime_limit,
         }
 
+    def should_cancel() -> bool:
+        """任务被显式取消、已被清理，或超过最大运行时间时返回 True。"""
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return True
+            if job.get("cancel_requested") or job.get("status") in TERMINAL_JOB_STATUSES:
+                return True
+            return time.time() >= float(job.get("deadline_at") or float("inf"))
+
     def worker() -> None:
         with JOBS_LOCK:
             job = JOBS.get(job_id)
@@ -1925,7 +1688,17 @@ def create_async_job(payload: dict) -> str:
             job["updated_at"] = time.time()
 
         try:
-            result = materialize_job_result(job_id, process_request_payload(payload))
+            result = materialize_job_result(
+                job_id,
+                # do_POST 在入队前已经完成校验，见 /api/generate-async。
+                process_request_payload(
+                    payload, should_cancel=should_cancel, already_validated=True
+                ),
+            )
+        except JobCancelledError:
+            # 状态已由 cancel_async_job / cleanup_jobs 写入，这里只需释放资产。
+            _remove_job_assets(job_id)
+            return
         except ValueError as exc:
             error_payload = {"message": str(exc)}
         except RuntimeError as exc:
@@ -2001,9 +1774,13 @@ def cancel_async_job(job_id: str) -> dict | None:
         job["error"] = {"message": "任务已取消", "code": "job_cancelled"}
         future = JOB_FUTURES.get(job_id)
         snapshot = dict(job)
-    if future is not None:
-        future.cancel()
-    _remove_job_assets(job_id)
+    # 尚未启动的任务可以直接撤单；已启动的任务由 should_cancel 在下一个分片处退出。
+    started = future is None or not future.cancel()
+    if not started:
+        # 确定没有工作线程在写这个目录，可以安全清理。
+        _remove_job_assets(job_id)
+    # 已启动的任务由 worker 自己在收到 JobCancelledError 后清理资产，
+    # 避免 rmtree 与 write_bytes 竞争产生孤儿文件。
     return snapshot
 
 
@@ -2049,8 +1826,9 @@ def stream_images_to_client(handler: SimpleHTTPRequestHandler, payload: dict) ->
 
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-    handler.send_header("Connection", "keep-alive")
+    # SSE 没有 Content-Length，在 HTTP/1.1 下必须显式关闭连接来界定响应边界。
+    # Connection: close 与 Cache-Control 都由 end_headers 统一发送，避免重复。
+    handler.close_connection = True
     handler.end_headers()
 
     meta_sent = False
@@ -2192,6 +1970,12 @@ def stream_images_to_client(handler: SimpleHTTPRequestHandler, payload: dict) ->
 
 
 class AppHandler(SimpleHTTPRequestHandler):
+    # HTTP/1.1 keep-alive: 首屏的 html/css/js 与每张生成图不再各自新建 TCP 连接和线程。
+    # 所有响应都显式带 Content-Length；唯一的例外是 SSE，见 do_POST 中的 Connection: close。
+    protocol_version = "HTTP/1.1"
+    # 防 slowloris：没有 timeout 时空连接会永久占住一个线程。
+    timeout = 30
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
 
@@ -2200,7 +1984,10 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         request_path = urlparse(self.path).path
-        if (
+        if request_path.startswith("/api/assets/"):
+            # 资产按 job_id(UUID)/文件名 寻址，任务存续期内内容不变，可长期缓存。
+            self.send_header("Cache-Control", f"private, max-age={ASSET_CACHE_SECONDS}, immutable")
+        elif (
             request_path.startswith("/api/")
             or request_path in {"/", "/index.html"}
             or request_path.endswith((".html", ".css", ".js"))
@@ -2214,6 +2001,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_header("X-Frame-Options", str(x_frame_options))
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        # 如果这条响应之后要关闭连接（SSE、未读完请求体的早退分支），明确告知客户端。
+        # close_connection 由 BaseHTTPRequestHandler 在处理请求时赋值，用 getattr 兜底。
+        if getattr(self, "close_connection", False):
+            self.send_header("Connection", "close")
         self.send_header(
             "Content-Security-Policy",
             build_content_security_policy(
@@ -2237,7 +2028,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             authorization = self.headers.get("Authorization", "")
             supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
             supplied = supplied or self.headers.get("X-Image-Client-Token", "").strip()
-            if not supplied or not hmac.compare_digest(supplied, expected):
+            # compare_digest 拒绝含非 ASCII 字符的 str，先编码为字节再比较
+            if not supplied or not hmac.compare_digest(
+                supplied.encode("utf-8"), expected.encode("utf-8")
+            ):
                 self._send_json(401, {"ok": False, "message": "API 访问需要有效的服务令牌"})
                 return False
 
@@ -2271,19 +2065,42 @@ class AppHandler(SimpleHTTPRequestHandler):
             self._send_json(404, {"ok": False, "message": "资源不存在或已过期"})
             return
         path = _asset_directory(job_id) / filename
-        if not path.is_file():
+        # 先看大小再读，否则这个上限什么也保护不了。
+        try:
+            stat_result = path.stat()
+        except OSError:
+            # 资产可能已被取消/过期清理删除，这里必须容错而不是抛出。
             self._send_json(404, {"ok": False, "message": "资源不存在或已过期"})
             return
-        body = path.read_bytes()
-        if len(body) > MAX_REMOTE_MEDIA_BYTES:
+        if not stat.S_ISREG(stat_result.st_mode):
+            self._send_json(404, {"ok": False, "message": "资源不存在或已过期"})
+            return
+        if stat_result.st_size > MAX_REMOTE_MEDIA_BYTES:
             self._send_json(500, {"ok": False, "message": "资源超过大小限制"})
             return
+
+        etag = f'"{job_id}-{filename}-{stat_result.st_size}"'
+        if self.headers.get("If-None-Match", "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            handle = path.open("rb")
+        except OSError:
+            self._send_json(404, {"ok": False, "message": "资源不存在或已过期"})
+            return
+        with handle:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(stat_result.st_size))
+            self.send_header("ETag", etag)
+            self.end_headers()
+            # 流式拷贝，避免把整张图再复制一份到内存。
+            shutil.copyfileobj(handle, self.wfile, 64 * 1024)
 
     def do_GET(self) -> None:
         request_path = urlparse(self.path).path
@@ -2326,10 +2143,14 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request_path = urlparse(self.path).path
+        # 这些早退分支都在读取请求体之前应答；HTTP/1.1 复用连接时若不关闭连接，
+        # 剩余的请求体会被当成下一个请求的起始行解析，导致连接错位。
         if request_path not in {"/api/generate", "/api/generate-async", "/api/generate-stream"}:
+            self.close_connection = True
             self._send_json(404, {"ok": False, "message": "Not Found"})
             return
         if not self._check_api_access(mutation=True):
+            self.close_connection = True
             return
 
         if self.headers.get("Transfer-Encoding", "").strip():
@@ -2340,9 +2161,11 @@ class AppHandler(SimpleHTTPRequestHandler):
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
+            self.close_connection = True
             self._send_json(400, {"ok": False, "message": "Content-Length 不合法"})
             return
         if content_length < 0:
+            self.close_connection = True
             self._send_json(400, {"ok": False, "message": "Content-Length 不合法"})
             return
         if content_length > MAX_REQUEST_BODY_BYTES:
@@ -2411,6 +2234,11 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         request_path = urlparse(self.path).path
+        # DELETE 从不读取请求体；带体的请求必须关闭连接，否则会与下一个请求错位。
+        if self.headers.get("Content-Length", "").strip() or self.headers.get(
+            "Transfer-Encoding", ""
+        ).strip():
+            self.close_connection = True
         if not request_path.startswith("/api/jobs/"):
             self._send_json(404, {"ok": False, "message": "Not Found"})
             return

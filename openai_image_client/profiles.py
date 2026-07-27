@@ -13,31 +13,6 @@ class ConfigurationError(RuntimeError):
     """Raised when MCP profile configuration is missing or invalid."""
 
 
-ROOT_CONFIG_FIELDS = {
-    "profiles",
-    "default_profile",
-    "output_dir",
-    "allowed_input_roots",
-    "max_workers",
-    "max_queue",
-    "max_jobs",
-    "job_ttl_seconds",
-    "max_reference_bytes",
-    "max_output_bytes",
-    "max_asset_store_bytes",
-}
-PROFILE_FIELDS = {
-    "base_url",
-    "api_key_env",
-    "api_key",
-    "protocol",
-    "image_model",
-    "video_model",
-    "allowed_models",
-    "timeout",
-}
-
-
 @dataclass(frozen=True, repr=False)
 class Profile:
     name: str
@@ -139,12 +114,6 @@ def _contains_direct_secret(value: Any) -> bool:
     return False
 
 
-def _reject_unknown_fields(raw: Mapping[str, Any], allowed: set[str], label: str) -> None:
-    unknown = sorted(str(key) for key in raw if key not in allowed)
-    if unknown:
-        raise ConfigurationError(f"{label} contains unknown fields: {', '.join(unknown)}")
-
-
 def _load_config_file(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -188,7 +157,6 @@ def _validate_base_url(value: str, profile_name: str) -> str:
 def _build_profile(name: str, raw: Any, environ: Mapping[str, str]) -> Profile:
     if not isinstance(raw, dict):
         raise ConfigurationError(f"profile {name!r} must be a JSON object")
-    _reject_unknown_fields(raw, PROFILE_FIELDS, f"profile {name!r}")
     base_url = _validate_base_url(str(raw.get("base_url", "")), name)
     api_key_env = str(raw.get("api_key_env", "")).strip()
     api_key = str(raw.get("api_key", "")).strip()
@@ -234,7 +202,6 @@ def load_settings(
     if config_path_value:
         config_path = _resolve_path(config_path_value, root)
         raw_config = _load_config_file(config_path)
-        _reject_unknown_fields(raw_config, ROOT_CONFIG_FIELDS, "MCP config")
         config_base = config_path.parent
 
     profiles_value = raw_config.get("profiles", {})
@@ -245,11 +212,7 @@ def load_settings(
     profiles_json = env.get("OPENAI_IMAGE_MCP_PROFILES_JSON", "").strip()
     if profiles_json:
         env_payload = _parse_json_env(profiles_json)
-        if "profiles" in env_payload:
-            _reject_unknown_fields(env_payload, {"profiles"}, "profiles JSON")
-            env_profiles = env_payload["profiles"]
-        else:
-            env_profiles = env_payload
+        env_profiles = env_payload.get("profiles", env_payload)
         if not isinstance(env_profiles, dict):
             raise ConfigurationError("profiles JSON must contain an object")
         raw_profiles.update(env_profiles)

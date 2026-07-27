@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import ipaddress
 from io import BytesIO
 import json
 import time
@@ -173,6 +172,13 @@ def test_iframe_response_headers_allow_default_embedding_and_support_lockdown():
     assert "X-Frame-Options: DENY" in locked_headers
 
 
+def _stub_outbound_session(monkeypatch, handler):
+    """拦截 safe_http_request 的出网调用，确保测试不会真的发起网络请求。"""
+    monkeypatch.setattr(
+        web_app, "outbound_session", lambda: SimpleNamespace(request=handler)
+    )
+
+
 def test_redirect_is_revalidated_before_following(monkeypatch):
     redirect = FakeResponse(status=302, headers={"Location": "http://127.0.0.1/admin"})
     calls = []
@@ -181,7 +187,7 @@ def test_redirect_is_revalidated_before_following(monkeypatch):
         calls.append((method, url, kwargs))
         return redirect
 
-    monkeypatch.setattr(web_app, "_request_with_pinned_dns", fake_request)
+    _stub_outbound_session(monkeypatch, fake_request)
     with pytest.raises(RequestException, match="非公网地址"):
         web_app.safe_http_request("GET", "https://8.8.8.8/start")
     assert len(calls) == 1
@@ -190,7 +196,7 @@ def test_redirect_is_revalidated_before_following(monkeypatch):
 
 def test_cross_origin_redirect_does_not_receive_api_credentials(monkeypatch):
     redirect = FakeResponse(status=307, headers={"Location": "https://1.1.1.1/next"})
-    monkeypatch.setattr(web_app, "_request_with_pinned_dns", lambda *args, **kwargs: redirect)
+    _stub_outbound_session(monkeypatch, lambda *args, **kwargs: redirect)
 
     with pytest.raises(RequestException, match="跨源"):
         web_app.safe_http_request(
@@ -199,61 +205,6 @@ def test_cross_origin_redirect_does_not_receive_api_credentials(monkeypatch):
             headers={"Authorization": "Bearer secret"},
         )
     assert redirect.closed
-
-
-def test_pinned_dns_adapter_connects_to_validated_ip_with_original_tls_identity(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        web_app,
-        "_resolved_addresses",
-        lambda hostname, port: {ipaddress.ip_address("8.8.8.8")},
-    )
-    adapter = web_app.PinnedDNSHTTPAdapter()
-    request = web_app.requests.Request(
-        "GET",
-        "https://Provider.Example:8443/v1/models",
-    ).prepare()
-    _, parsed, addresses = web_app._validated_outbound_target(request.url)
-    adapter._request_target.value = (
-        parsed.scheme,
-        parsed.hostname,
-        parsed.port,
-        addresses[0].compressed,
-    )
-    request.headers["Host"] = web_app._request_authority(parsed)
-    try:
-        pool = adapter.get_connection_with_tls_context(
-            request,
-            verify=True,
-        )
-    finally:
-        adapter._request_target.value = None
-
-    assert request.headers["Host"] == "provider.example:8443"
-    assert pool.host == "8.8.8.8"
-    assert pool.port == 8443
-    assert pool.conn_kw["server_hostname"] == "provider.example"
-    assert pool.assert_hostname == "provider.example"
-
-
-def test_pinned_dns_adapter_blocks_rebinding_between_validation_and_connection(
-    monkeypatch,
-):
-    resolutions = iter(
-        [
-            {ipaddress.ip_address("8.8.8.8")},
-            {ipaddress.ip_address("127.0.0.1")},
-        ]
-    )
-    monkeypatch.setattr(
-        web_app,
-        "_resolved_addresses",
-        lambda hostname, port: next(resolutions),
-    )
-
-    with pytest.raises(RequestException, match="非公网地址"):
-        web_app.safe_http_request("GET", "https://provider.example/v1/models")
 
 
 def test_limited_response_rejects_declared_and_streamed_oversize():

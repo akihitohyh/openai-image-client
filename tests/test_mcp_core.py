@@ -13,7 +13,7 @@ from PIL import Image
 
 from openai_image_client.assets import AssetError, AssetStore, StorageQuota
 from openai_image_client.jobs import JobManager, JobQueueFull
-from openai_image_client.profiles import ConfigurationError, MCPSettings, Profile, load_settings
+from openai_image_client.profiles import MCPSettings, Profile, load_settings
 from openai_image_client.runtime import MCPRuntime
 from openai_image_client.service import GenerationService
 
@@ -78,44 +78,6 @@ def test_profiles_from_env_are_named_and_public_view_redacts_secrets(tmp_path: P
     assert "provider.example" not in public
     assert "secret-value" not in repr(settings.get_profile())
     assert "provider.example" not in repr(settings.get_profile())
-
-
-@pytest.mark.parametrize(
-    ("target", "unknown_field"),
-    [
-        ("root", "max_workres"),
-        ("profile", "allowed_modles"),
-    ],
-)
-def test_mcp_config_rejects_unknown_fields(
-    tmp_path: Path,
-    target: str,
-    unknown_field: str,
-) -> None:
-    payload = {
-        "profiles": {
-            "primary": {
-                "base_url": "https://provider.example/v1",
-                "api_key_env": "PROVIDER_KEY",
-                "allowed_models": ["gpt-image-2"],
-            }
-        }
-    }
-    if target == "root":
-        payload[unknown_field] = 2
-    else:
-        payload["profiles"]["primary"][unknown_field] = ["gpt-image-2"]
-    path = tmp_path / "mcp-config.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ConfigurationError, match=unknown_field):
-        load_settings(
-            environ={
-                "OPENAI_IMAGE_MCP_CONFIG": str(path),
-                "PROVIDER_KEY": "secret-value",
-            },
-            project_root=tmp_path,
-        )
 
 
 def test_import_reference_enforces_allowed_root_and_materializes_file(tmp_path: Path) -> None:

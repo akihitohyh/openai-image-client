@@ -41,6 +41,20 @@ class MCPRuntime:
             shared_quota=storage_quota,
         )
         service = GenerationService(resolved_settings, assets, processor=processor)
+
+        def discard_result_assets(result: dict[str, Any]) -> None:
+            """Delete assets from a job result that will never be handed to a client."""
+            items = result.get("assets") if isinstance(result, dict) else None
+            if not isinstance(items, list):
+                return
+            asset_ids = [
+                str(item["asset_id"])
+                for item in items
+                if isinstance(item, dict) and item.get("asset_id")
+            ]
+            if asset_ids:
+                assets.delete_many(asset_ids)
+
         jobs = JobManager(
             max_workers=resolved_settings.max_workers,
             max_queue=resolved_settings.max_queue,
@@ -50,6 +64,7 @@ class MCPRuntime:
             executor=executor,
             capacity=capacity,
             submission_guard=submission_guard,
+            result_discarder=discard_result_assets,
         )
         return cls(
             settings=resolved_settings,
@@ -63,13 +78,15 @@ class MCPRuntime:
         include_paths: bool = True,
         transport: str = "stdio",
     ) -> dict[str, Any]:
+        # Read these from the shared core rather than reaching into web_app: the MCP
+        # package depending on the web entry point had the dependency backwards.
         try:
-            import web_app
+            from image_client_core import models as grok_models
 
-            grok_image_models = sorted(web_app.GROK_IMAGE_GENERATION_MODELS)
-            grok_video_models = sorted(web_app.GROK_VIDEO_MODELS)
-            grok_ratios = sorted(web_app.GROK_SUPPORTED_RATIOS)
-            grok_video_ratios = sorted(web_app.GROK_VIDEO_SUPPORTED_RATIOS)
+            grok_image_models = sorted(grok_models.GROK_IMAGE_GENERATION_MODELS)
+            grok_video_models = sorted(grok_models.GROK_VIDEO_MODELS)
+            grok_ratios = sorted(grok_models.GROK_SUPPORTED_RATIOS)
+            grok_video_ratios = sorted(grok_models.GROK_VIDEO_SUPPORTED_RATIOS)
         except (ImportError, AttributeError):
             grok_image_models = []
             grok_video_models = []
@@ -116,6 +133,17 @@ class MCPRuntime:
                 "remote_video_results": "text/uri-list pointer resource",
             },
         }
+
+    def prune_assets(self, *, max_age_seconds: float | None = None) -> int:
+        """Reclaim assets orphaned by a crash, and enforce the store cap.
+
+        Job results release their own assets when the job record is cancelled or
+        evicted, so this is only needed for assets left behind by an unclean
+        shutdown. Operators can schedule it; nothing calls it automatically.
+        """
+        if max_age_seconds is None:
+            max_age_seconds = float(self.settings.job_ttl_seconds)
+        return self.assets.prune(max_age_seconds=max_age_seconds)
 
     def close(self, wait: bool = False) -> None:
         self.jobs.close(wait=wait)

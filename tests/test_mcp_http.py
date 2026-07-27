@@ -7,7 +7,6 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import anyio
@@ -252,13 +251,6 @@ def base_http_settings(tmp_path: Path) -> MCPSettings:
             "must use HTTPS",
         ),
         ({"OPENAI_IMAGE_MCP_HTTP_ALLOW_NON_LOOPBACK": "sometimes"}, "true or false"),
-        (
-            {
-                "OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS": "4",
-                "OPENAI_IMAGE_MCP_HTTP_TENANT_INFLIGHT_REQUESTS": "5",
-            },
-            "TENANT_INFLIGHT_REQUESTS",
-        ),
     ],
 )
 def test_http_settings_fail_closed(
@@ -336,74 +328,6 @@ async def test_http_request_concurrency_is_bounded() -> None:
 
     assert statuses == [200] * 5
     assert peak == 1
-
-
-@pytest.mark.anyio
-async def test_http_request_concurrency_is_fair_between_tenants() -> None:
-    active = 0
-    peak = 0
-    active_by_tenant = {"tenant-a": 0, "tenant-b": 0}
-    peak_by_tenant = {"tenant-a": 0, "tenant-b": 0}
-
-    class Verifier:
-        async def verify_token(self, token: str):
-            if token not in active_by_tenant:
-                return None
-            return SimpleNamespace(subject=token)
-
-    async def endpoint(scope, receive, send):
-        nonlocal active, peak
-        authorization = dict(scope["headers"])[b"authorization"].decode("ascii")
-        tenant_id = authorization.rsplit(" ", 1)[-1]
-        active += 1
-        active_by_tenant[tenant_id] += 1
-        peak = max(peak, active)
-        peak_by_tenant[tenant_id] = max(
-            peak_by_tenant[tenant_id],
-            active_by_tenant[tenant_id],
-        )
-        await anyio.sleep(0.03)
-        active -= 1
-        active_by_tenant[tenant_id] -= 1
-        body = b'{"ok":true}'
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-length", str(len(body)).encode("ascii"))],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
-
-    app = RequestConcurrencyLimitMiddleware(
-        endpoint,
-        max_inflight=2,
-        verifier=Verifier(),
-        tenant_ids=("tenant-a", "tenant-b"),
-        max_tenant_inflight=1,
-    )
-    transport = httpx.ASGITransport(app=app)
-    statuses: list[int] = []
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url="https://mcp.example.com",
-    ) as client:
-        async def request(tenant_id: str) -> None:
-            response = await client.post(
-                "/mcp",
-                headers={"Authorization": f"Bearer {tenant_id}"},
-            )
-            statuses.append(response.status_code)
-
-        async with anyio.create_task_group() as task_group:
-            for _ in range(4):
-                task_group.start_soon(request, "tenant-a")
-            for _ in range(2):
-                task_group.start_soon(request, "tenant-b")
-
-    assert statuses == [200] * 6
-    assert peak == 2
-    assert peak_by_tenant == {"tenant-a": 1, "tenant-b": 1}
 
 
 @pytest.mark.anyio

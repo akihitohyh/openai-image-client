@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import math
 import mimetypes
 import os
 import sys
@@ -15,6 +14,33 @@ from typing import Any
 
 import requests
 from requests import RequestException
+
+from image_client_core.endpoints import (
+    candidate_endpoints,
+    video_poll_endpoint_from_generation,
+)
+from image_client_core.models import (
+    GROK_RESOLUTION_VALUES,
+    GROK_RESPONSE_FORMAT_VALUES,
+    GROK_SUPPORTED_RATIOS,
+    GROK_VIDEO_RESOLUTION_VALUES,
+    GROK_VIDEO_SUPPORTED_RATIOS,
+    grok_aspect_ratio_from_size,
+    grok_resolution_from_size,
+    grok_video_aspect_ratio_from_size,
+    grok_video_resolution_from_size,
+    is_gpt_image_2,
+    is_grok_image_model,
+    is_grok_video_model,
+)
+from image_client_core.responses import (
+    decode_base64_limited,
+    exception_diagnostic,
+    likely_gateway_or_upstream_error,
+    likely_non_retryable_client_error,
+    response_diagnostic,
+    response_json_limited,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -29,63 +55,9 @@ MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 IMAGE_QUALITY_VALUES = {"auto", "low", "medium", "high"}
 OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
 BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
-GPT_IMAGE_2_BACKGROUND_VALUES = {"auto", "opaque"}
 MODERATION_VALUES = {"auto", "low"}
 PROTOCOL_VALUES = {"auto", "openai", "grok"}
 MODE_VALUES = {"generate", "edit", "video"}
-GROK_RESOLUTION_VALUES = {"", "1k", "2k"}
-GROK_RESPONSE_FORMAT_VALUES = {"", "url", "b64_json"}
-GROK_VIDEO_RESOLUTION_VALUES = {"", "480p", "720p", "1080p"}
-GROK_IMAGE_MODELS = (
-    "grok-imagine-edit",
-    "grok-imagine-image",
-    "grok-imagine-image-lite",
-    "grok-imagine-image-pro",
-    "grok-imagine-image-quality",
-)
-GROK_VIDEO_MODELS = (
-    "grok-imagine-video",
-    "grok-imagine-video-1.5",
-)
-KNOWN_API_ENDPOINTS = (
-    "/v1/images/generations",
-    "/images/generations",
-    "/v1/images/edits",
-    "/images/edits",
-    "/v1/images/variations",
-    "/images/variations",
-    "/v1/videos/generations",
-    "/videos/generations",
-    "/v1/videos/edits",
-    "/videos/edits",
-    "/v1/videos/extensions",
-    "/videos/extensions",
-)
-GROK_SUPPORTED_RATIOS = {
-    "1:1",
-    "16:9",
-    "9:16",
-    "4:3",
-    "3:4",
-    "3:2",
-    "2:3",
-    "2:1",
-    "1:2",
-    "19.5:9",
-    "9:19.5",
-    "20:9",
-    "9:20",
-    "auto",
-}
-GROK_VIDEO_SUPPORTED_RATIOS = {
-    "1:1",
-    "16:9",
-    "9:16",
-    "4:3",
-    "3:4",
-    "3:2",
-    "2:3",
-}
 
 
 def load_config() -> dict[str, Any]:
@@ -113,101 +85,6 @@ def prompt_if_missing(value: str, label: str, secret: bool = False) -> str:
 
         return getpass.getpass(prompt).strip()
     return input(prompt).strip()
-
-
-def normalize_base_url(base_url: str) -> str:
-    return (base_url or "").strip().rstrip("/")
-
-
-def join_url(base_url: str, suffix: str) -> str:
-    return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
-
-
-def candidate_endpoints(base_url: str, route: str) -> list[str]:
-    value = normalize_base_url(base_url)
-    if not value:
-        return []
-
-    for endpoint in KNOWN_API_ENDPOINTS:
-        if value.endswith(endpoint):
-            prefix = value[: -len(endpoint)]
-            if endpoint.startswith("/v1/"):
-                return [join_url(prefix, f"v1/{route}")]
-            return [join_url(prefix, route)]
-
-    if value.endswith("/v1"):
-        return [join_url(value, route)]
-    return [
-        join_url(value, f"v1/{route}"),
-        join_url(value, route),
-    ]
-
-
-def preview_response_body(response: requests.Response, limit: int = 300) -> str:
-    content_type = response.headers.get("Content-Type", "").lower()
-    if "application/json" in content_type:
-        try:
-            data = response.json()
-        except ValueError:
-            pass
-        else:
-            if isinstance(data, dict):
-                message = data.get("message") or data.get("error")
-                if isinstance(message, dict):
-                    message = message.get("message")
-                if message:
-                    return str(message)[:limit]
-                return json.dumps(data, ensure_ascii=False)[:limit]
-    return response.text[:limit].replace("\n", " ").strip()
-
-
-def json_error_type(response: requests.Response) -> str:
-    content_type = response.headers.get("Content-Type", "").lower()
-    if "application/json" not in content_type:
-        return ""
-    try:
-        data = response.json()
-    except ValueError:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    error = data.get("error")
-    if isinstance(error, dict):
-        return str(error.get("type", ""))
-    return str(data.get("type", ""))
-
-
-def response_diagnostic(endpoint: str, response: requests.Response) -> str:
-    content_type = response.headers.get("Content-Type", "") or "unknown"
-    request_id = response.headers.get("x-request-id") or response.headers.get("cf-ray")
-    error_type = json_error_type(response)
-    parts = [
-        f"- {endpoint} -> HTTP {response.status_code}",
-        f"Content-Type: {content_type}",
-    ]
-    if request_id:
-        parts.append(f"Request-ID: {request_id}")
-    if error_type:
-        parts.append(f"Error-Type: {error_type}")
-    body_preview = preview_response_body(response)
-    if body_preview:
-        parts.append(f"Body: {body_preview}")
-    return ", ".join(parts)
-
-
-def exception_diagnostic(endpoint: str, exc: BaseException) -> str:
-    return f"- {endpoint} -> 请求异常: {type(exc).__name__}: {exc}"
-
-
-def likely_gateway_or_upstream_error(response: requests.Response) -> bool:
-    content_type = response.headers.get("Content-Type", "").lower()
-    error_type = json_error_type(response)
-    return (
-        response.status_code >= 500
-        or response.status_code in {502, 503, 504}
-        or "upstream" in error_type
-        or (response.status_code >= 500 and "text/html" in content_type)
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -277,20 +154,6 @@ def validate_choice(name: str, value: str, allowed: set[str]) -> None:
         raise SystemExit(f"{name}={value!r} 不支持，可选值: {choices}")
 
 
-def is_gpt_image_2(model: str) -> bool:
-    return model == "gpt-image-2" or model.startswith("gpt-image-2-")
-
-
-def is_grok_image_model(model: str) -> bool:
-    value = model.strip().lower()
-    return value == "grok-imagine" or any(value == item or value.startswith(f"{item}-") for item in GROK_IMAGE_MODELS)
-
-
-def is_grok_video_model(model: str) -> bool:
-    value = model.strip().lower()
-    return any(value == item or value.startswith(f"{item}-") for item in GROK_VIDEO_MODELS)
-
-
 def resolve_protocol(protocol: str, model: str, base_url: str) -> str:
     value = (protocol or "auto").strip().lower()
     validate_choice("protocol", value, PROTOCOL_VALUES)
@@ -300,94 +163,6 @@ def resolve_protocol(protocol: str, model: str, base_url: str) -> str:
     if is_grok_image_model(model) or is_grok_video_model(model) or "api.x.ai" in base or "x.ai" in base:
         return "grok"
     return "openai"
-
-
-def parse_size(size: str) -> tuple[int, int] | None:
-    value = (size or "").strip().lower()
-    if "x" not in value:
-        return None
-    left, right = value.split("x", 1)
-    try:
-        width = int(left)
-        height = int(right)
-    except ValueError:
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return width, height
-
-
-def closest_grok_ratio(width: int, height: int) -> str:
-    exact_gcd = math.gcd(width, height)
-    exact_ratio = f"{width // exact_gcd}:{height // exact_gcd}"
-    if exact_ratio in GROK_SUPPORTED_RATIOS:
-        return exact_ratio
-
-    current = width / height
-    best_ratio = "1:1"
-    best_delta = float("inf")
-    for candidate in GROK_SUPPORTED_RATIOS - {"auto"}:
-        left, right = candidate.split(":", 1)
-        candidate_value = float(left) / float(right)
-        delta = abs(current - candidate_value)
-        if delta < best_delta:
-            best_ratio = candidate
-            best_delta = delta
-    return best_ratio
-
-
-def grok_aspect_ratio_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "1:1"
-    width, height = parsed
-    return closest_grok_ratio(width, height)
-
-
-def grok_resolution_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "1k"
-    return "2k" if max(parsed) > 1536 else "1k"
-
-
-def closest_grok_video_ratio(width: int, height: int) -> str:
-    exact_gcd = math.gcd(width, height)
-    exact_ratio = f"{width // exact_gcd}:{height // exact_gcd}"
-    if exact_ratio in GROK_VIDEO_SUPPORTED_RATIOS:
-        return exact_ratio
-
-    current = width / height
-    best_ratio = "16:9"
-    best_delta = float("inf")
-    for candidate in GROK_VIDEO_SUPPORTED_RATIOS:
-        left, right = candidate.split(":", 1)
-        candidate_value = float(left) / float(right)
-        delta = abs(current - candidate_value)
-        if delta < best_delta:
-            best_ratio = candidate
-            best_delta = delta
-    return best_ratio
-
-
-def grok_video_aspect_ratio_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "16:9"
-    width, height = parsed
-    return closest_grok_video_ratio(width, height)
-
-
-def grok_video_resolution_from_size(size: str) -> str:
-    parsed = parse_size(size)
-    if not parsed:
-        return "480p"
-    long_edge = max(parsed)
-    if long_edge > 1536:
-        return "1080p"
-    if long_edge > 720:
-        return "720p"
-    return "480p"
 
 
 def normalized_image_suffix(output_format: str) -> str:
@@ -412,12 +187,9 @@ def save_b64_image(image_b64: str, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if image_b64.startswith("data:") and "," in image_b64:
         image_b64 = image_b64.split(",", 1)[1]
-    max_encoded_size = ((MAX_DOWNLOAD_BYTES + 2) // 3) * 4
-    if len(image_b64) > max_encoded_size:
-        raise ValueError(f"媒体文件超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB 限制")
-    decoded = base64.b64decode(image_b64)
-    if len(decoded) > MAX_DOWNLOAD_BYTES:
-        raise ValueError(f"媒体文件超过 {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB 限制")
+    # 必须用严格解码：base64.b64decode 默认会丢弃所有非字母表字符，于是上游返回的
+    # HTML 错误页或被截断的载荷会被"成功"解码成垃圾，再当作正常图片写进 .png。
+    decoded = decode_base64_limited(image_b64, MAX_DOWNLOAD_BYTES, "媒体文件")
     temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.part")
     try:
         temporary_path.write_bytes(decoded)
@@ -702,13 +474,6 @@ def build_grok_video_payload(
     return payload
 
 
-def video_poll_endpoint_from_generation(endpoint: str, request_id: str) -> str:
-    value = endpoint.rstrip("/")
-    if value.endswith("/generations"):
-        return f"{value.rsplit('/', 1)[0]}/{request_id}"
-    return join_url(value, f"videos/{request_id}")
-
-
 def extract_video_urls(data: dict[str, Any]) -> list[str]:
     videos: list[str] = []
 
@@ -766,7 +531,7 @@ def request_grok_video_generation(
         content_type = current.headers.get("Content-Type", "")
         if current.ok and "text/html" not in content_type.lower():
             try:
-                data = current.json()
+                data = response_json_limited(current)
             except ValueError as exc:
                 diagnostics.append(f"- {endpoint} -> JSON 解析失败: {exc}")
                 last_response = current
@@ -811,7 +576,13 @@ def request_grok_video_generation(
                         "视频任务轮询失败：\n"
                         + response_diagnostic(poll_endpoint, polled)
                     )
-                poll_data = polled.json()
+                try:
+                    poll_data = response_json_limited(polled)
+                except ValueError as exc:
+                    raise SystemExit(
+                        "视频任务轮询返回的内容不是合法的 JSON 对象：\n"
+                        + response_diagnostic(poll_endpoint, polled)
+                    ) from exc
                 status = str(poll_data.get("status", "")).strip().lower()
                 if status == "done" or extract_video_urls(poll_data):
                     poll_data.setdefault("request_id", request_id)
@@ -827,7 +598,10 @@ def request_grok_video_generation(
         diagnostics.append(response_diagnostic(endpoint, current))
         last_response = current
         last_endpoint = endpoint
-        if likely_gateway_or_upstream_error(current):
+        # 4xx 是上游的明确拒绝，换一个候选端点只会得到同样的结果。不加这个判断，
+        # 一次 400 就会把整个 multipart 请求体（每张参考图最多 50MB）重新 POST 一遍，
+        # 白费带宽，而且首次请求其实已经到达上游时还有重复计费风险。
+        if likely_gateway_or_upstream_error(current) or likely_non_retryable_client_error(current):
             break
 
     message = ["请求失败，未找到可用的 grok 视频接口。"]
@@ -1057,7 +831,10 @@ def main() -> int:
         diagnostics.append(response_diagnostic(endpoint, current))
         last_response = current
         last_endpoint = endpoint
-        if likely_gateway_or_upstream_error(current):
+        # 4xx 是上游的明确拒绝，换一个候选端点只会得到同样的结果。不加这个判断，
+        # 一次 400 就会把整个 multipart 请求体（每张参考图最多 50MB）重新 POST 一遍，
+        # 白费带宽，而且首次请求其实已经到达上游时还有重复计费风险。
+        if likely_gateway_or_upstream_error(current) or likely_non_retryable_client_error(current):
             break
 
     if response is None:
@@ -1101,7 +878,15 @@ def main() -> int:
             )
         raise SystemExit("\n".join(message))
 
-    data = response.json()
+    # HTTP 200 但内容不是 JSON 对象（登录页、text/plain、顶层是数组）时，
+    # 原来的 response.json() / data.get() 会直接抛裸异常栈。
+    try:
+        data = response_json_limited(response)
+    except ValueError as exc:
+        raise SystemExit(
+            "接口返回 HTTP 200，但响应内容不是合法的 JSON 对象：\n"
+            + response_diagnostic(last_endpoint, response)
+        ) from exc
     items = data.get("data")
     if not isinstance(items, list) or not items:
         raise SystemExit(f"接口返回异常，未找到 data: {json.dumps(data, ensure_ascii=False)[:1000]}")

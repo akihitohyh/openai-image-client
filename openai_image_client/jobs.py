@@ -91,6 +91,7 @@ class JobManager:
         executor: ThreadPoolExecutor | None = None,
         capacity: JobCapacity | None = None,
         submission_guard: Callable[[], None] | None = None,
+        result_discarder: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if (executor is None) != (capacity is None):
             raise ValueError("executor and capacity must be provided together")
@@ -108,12 +109,25 @@ class JobManager:
         self._lock = threading.RLock()
         self._error_sanitizer = error_sanitizer or self._default_error_sanitizer
         self._submission_guard = submission_guard
+        self._result_discarder = result_discarder
         self._closed = False
 
     @staticmethod
     def _default_error_sanitizer(exc: BaseException) -> str:
         value = f"{type(exc).__name__}: {exc}".replace("\x00", "")
         return value[:4000]
+
+    def _discard_results(self, records: list["JobRecord"]) -> None:
+        """Release assets belonging to job records that are no longer reachable."""
+        if self._result_discarder is None:
+            return
+        for record in records:
+            if not record.result:
+                continue
+            try:
+                self._result_discarder(record.result)
+            except Exception:  # noqa: BLE001 - cleanup must never propagate
+                pass
 
     def cleanup(self, now: float | None = None) -> None:
         current = time.time() if now is None else now
@@ -123,8 +137,9 @@ class JobManager:
                 for job_id, job in self._jobs.items()
                 if job.status in FINAL_STATUSES and current - job.updated_at > self.ttl_seconds
             ]
-            for job_id in expired:
-                self._jobs.pop(job_id, None)
+            dropped = [self._jobs.pop(job_id) for job_id in expired if job_id in self._jobs]
+        # Called outside the lock: asset deletion is file I/O.
+        self._discard_results(dropped)
 
     def submit(self, operation: str, work: Callable[[], dict[str, Any]]) -> str:
         with self._lock:
@@ -146,6 +161,8 @@ class JobManager:
             created_at=now,
             updated_at=now,
         )
+        evicted: list[JobRecord] = []
+        registry_full = False
         with self._lock:
             if self._closed:
                 self._capacity.release()
@@ -156,15 +173,20 @@ class JobManager:
                     key=lambda item: item.updated_at,
                 )
                 for terminal in terminal_jobs:
-                    self._jobs.pop(terminal.job_id, None)
+                    dropped = self._jobs.pop(terminal.job_id, None)
+                    if dropped is not None:
+                        evicted.append(dropped)
                     if len(self._jobs) < self.max_jobs:
                         break
             if len(self._jobs) >= self.max_jobs:
                 self._capacity.release()
-                raise JobQueueFull(
-                    f"job registry is full ({self.max_jobs} active jobs)"
-                )
-            self._jobs[job_id] = record
+                registry_full = True
+            else:
+                self._jobs[job_id] = record
+        # Outside the lock: releasing assets is file I/O.
+        self._discard_results(evicted)
+        if registry_full:
+            raise JobQueueFull(f"job registry is full ({self.max_jobs} active jobs)")
 
         def run() -> dict[str, Any]:
             with self._lock:
@@ -190,15 +212,27 @@ class JobManager:
                             current.error = self._error_sanitizer(exc)
                         current.updated_at = time.time()
                 return {}
+            discarded = False
             with self._lock:
                 current = self._jobs.get(job_id)
-                if current is not None:
-                    if current.cancel_requested:
-                        current.status = "cancelled"
-                    else:
-                        current.status = "succeeded"
-                        current.result = copy.deepcopy(result)
+                if current is None:
+                    # Record was evicted while we ran; its assets are unreachable.
+                    discarded = True
+                elif current.cancel_requested:
+                    current.status = "cancelled"
                     current.updated_at = time.time()
+                    discarded = True
+                else:
+                    current.status = "succeeded"
+                    current.result = copy.deepcopy(result)
+                    current.updated_at = time.time()
+            if discarded and self._result_discarder is not None:
+                # work() already wrote assets to disk and charged the quota, but the
+                # result is being thrown away — release those bytes or they leak forever.
+                try:
+                    self._result_discarder(result)
+                except Exception:  # noqa: BLE001 - cleanup must not mask cancellation
+                    pass
             return result
 
         with self._lock:

@@ -4,11 +4,15 @@
 
 @layer base {
   html {
-    color-scheme: light;
+    color-scheme: dark;
   }
 
   body {
     min-width: 320px;
+    background-image:
+      radial-gradient(60rem 40rem at 12% -10%, rgb(34 211 238 / 7%), transparent 60%),
+      radial-gradient(50rem 36rem at 100% 0%, rgb(139 92 246 / 5%), transparent 55%);
+    background-attachment: fixed;
   }
 
   button,
@@ -16,6 +20,121 @@
   select,
   textarea {
     letter-spacing: 0;
+  }
+
+  ::selection {
+    background: rgb(34 211 238 / 30%);
+  }
+
+  /* Chrome 的自动填充会强行刷成白底黑字，在深色下非常刺眼 */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus {
+    -webkit-text-fill-color: #e4e4e7;
+    -webkit-box-shadow: 0 0 0 1000px #161a22 inset;
+    caret-color: #e4e4e7;
+    transition: background-color 9999s ease-out;
+  }
+
+  /* 深色下的滚动条；不加的话浏览器会给出亮色的默认样式 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 14%) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 12%);
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 22%);
+    background-clip: content-box;
+  }
+
+  /* 原生下拉箭头在深色下会变成黑色方块 */
+  select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2371717a' stroke-width='1.6'%3E%3Cpath d='M6 8l4 4 4-4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    background-size: 1.15em;
+    padding-right: 2.1rem;
+  }
+
+  select option {
+    background-color: #161a22;
+    color: #e4e4e7;
+  }
+
+  /* 数字输入框的加减箭头在深色下同样不可读，直接去掉 */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+
+  input[type='number'] {
+    appearance: textfield;
+  }
+}
+
+@layer components {
+  /* 表单控件的统一外观，避免在 HTML 里重复十几遍同一串 class */
+  .field {
+    @apply w-full text-sm px-3 py-2.5 bg-ink-850 text-zinc-100 rounded-lg
+           border border-white/10 placeholder:text-zinc-600
+           focus:outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/25
+           hover:border-white/20 transition;
+  }
+
+  .field-label {
+    @apply block text-[11px] font-semibold uppercase tracking-wide text-zinc-500 mb-1.5;
+  }
+
+  /* 分段控件（协议 / 模式） */
+  .segment {
+    @apply grid gap-1 bg-ink-850 p-1 rounded-xl border border-white/10;
+  }
+
+  .panel {
+    @apply bg-ink-900/80 border border-white/10 rounded-2xl shadow-raise backdrop-blur-sm;
+  }
+
+  /* <details> 的展开箭头 */
+  .disclosure > summary {
+    @apply flex items-center gap-2 cursor-pointer select-none list-none
+           text-[11px] font-semibold uppercase tracking-wide text-zinc-500
+           hover:text-zinc-300 transition;
+  }
+
+  .disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .disclosure > summary::before {
+    content: '';
+    width: 0.34rem;
+    height: 0.34rem;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform 160ms ease;
+  }
+
+  .disclosure[open] > summary::before {
+    transform: rotate(45deg);
   }
 }
 
@@ -28,16 +147,28 @@
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
+
+  /* 棋盘格：透明背景的 PNG 在纯深色上看不出边界 */
+  .checkerboard {
+    background-color: #0b0d11;
+    background-image:
+      linear-gradient(45deg, #191d25 25%, transparent 25%),
+      linear-gradient(-45deg, #191d25 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #191d25 75%),
+      linear-gradient(-45deg, transparent 75%, #191d25 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  }
 }
 
 .lightbox-backdrop {
-  background: rgb(15 23 42 / 78%);
-  backdrop-filter: blur(6px);
+  background: rgb(6 8 12 / 82%);
+  backdrop-filter: blur(10px);
 }
 
 .dropzone-active {
-  border-color: rgb(100 116 139);
-  background: rgb(248 250 252);
+  border-color: rgb(34 211 238 / 60%);
+  background: rgb(34 211 238 / 6%);
 }
 
 @media (prefers-reduced-motion: reduce) {
