@@ -240,6 +240,151 @@ def test_generated_images_have_a_total_memory_limit(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("base_url", "model", "expected"),
+    [
+        (
+            "https://generativelanguage.googleapis.com",
+            "gemini-2.5-flash-image",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+        ),
+        (
+            "https://gemini.example/v1beta/",
+            "models/custom image",
+            "https://gemini.example/v1beta/models/custom%20image:generateContent",
+        ),
+        (
+            "https://gemini.example/v1/models/already-set:generateContent",
+            "ignored-model",
+            "https://gemini.example/v1/models/already-set:generateContent",
+        ),
+    ],
+)
+def test_gemini_generate_endpoint(base_url, model, expected):
+    assert web_app.gemini_generate_endpoint(base_url, model) == expected
+
+
+def test_gemini_request_body_supports_native_image_config_and_references():
+    reference = base64.b64encode(b"reference-image").decode()
+    payload = valid_payload(
+        protocol="gemini",
+        model="gemini-image-model",
+        mode="edit",
+        aspect_ratio="16:9",
+        resolution="4K",
+        edit_images=[{"data_url": f"data:image/png;base64,{reference}"}],
+    )
+
+    body = web_app.build_gemini_request_body(payload, payload["prompt"])
+    assert body["generationConfig"] == {
+        "responseModalities": ["TEXT", "IMAGE"],
+        "imageConfig": {"aspectRatio": "16:9", "imageSize": "4K"},
+    }
+    assert body["contents"][0]["parts"] == [
+        {"text": "draw a lighthouse"},
+        {"inlineData": {"mimeType": "image/png", "data": reference}},
+    ]
+
+
+def test_gemini_response_parser_accepts_camel_and_snake_case_and_redacts_raw():
+    first = base64.b64encode(b"first-image").decode()
+    second = base64.b64encode(b"second-image").decode()
+    data = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "generated"},
+                        {"inlineData": {"mimeType": "image/png", "data": first}},
+                        {"inline_data": {"mime_type": "image/webp", "data": second}},
+                    ]
+                }
+            }
+        ]
+    }
+    images = web_app.parse_gemini_image_response(data, "request-id", "https://gemini.example")
+    assert images == [
+        f"data:image/png;base64,{first}",
+        f"data:image/webp;base64,{second}",
+    ]
+    compact = web_app.compact_gemini_raw_response(data)
+    serialized = json.dumps(compact)
+    assert first not in serialized
+    assert second not in serialized
+    assert serialized.count("<omitted>") == 2
+
+
+def test_gemini_response_parser_rejects_missing_invalid_and_oversized_images(monkeypatch):
+    with pytest.raises(RuntimeError, match="没有可用的图片"):
+        web_app.parse_gemini_image_response(
+            {"candidates": [{"finishReason": "SAFETY"}]},
+            "request-id",
+            "https://gemini.example",
+        )
+
+    invalid = {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": "@@@"}}]}}]}
+    with pytest.raises(ValueError, match="Base64"):
+        web_app.parse_gemini_image_response(invalid, "request-id", "https://gemini.example")
+
+    monkeypatch.setattr(web_app, "MAX_REMOTE_MEDIA_BYTES", 2)
+    oversized = base64.b64encode(b"abc").decode()
+    data = {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": oversized}}]}}]}
+    with pytest.raises(ValueError, match="超过"):
+        web_app.parse_gemini_image_response(data, "request-id", "https://gemini.example")
+
+
+def test_gemini_multiple_outputs_use_sequential_native_requests(monkeypatch):
+    encoded = base64.b64encode(b"generated-image").decode()
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse(
+            {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": encoded}}]}}]}
+        )
+
+    monkeypatch.setattr(web_app, "safe_http_request", fake_request)
+    result = web_app.request_gemini_image_api(
+        "https://gemini.example/v1beta",
+        "secret-key",
+        30,
+        "gemini-image-model",
+        json_body={"contents": []},
+        count=2,
+    )
+
+    assert len(calls) == 2
+    assert len(result["images"]) == 2
+    for method, endpoint, kwargs in calls:
+        assert method == "POST"
+        assert endpoint.endswith("/models/gemini-image-model:generateContent")
+        assert kwargs["headers"]["x-goog-api-key"] == "secret-key"
+        assert kwargs["headers"]["Authorization"] == "Bearer secret-key"
+        assert kwargs["json"] == {"contents": []}
+
+
+def test_gemini_multiple_outputs_honor_cancellation_between_requests(monkeypatch):
+    encoded = base64.b64encode(b"generated-image").decode()
+    monkeypatch.setattr(
+        web_app,
+        "safe_http_request",
+        lambda *args, **kwargs: FakeResponse(
+            {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": encoded}}]}}]}
+        ),
+    )
+    checks = iter([False, True])
+    with pytest.raises(web_app.JobCancelledError):
+        web_app.request_gemini_image_api(
+            "https://gemini.example/v1beta",
+            "secret-key",
+            30,
+            "gemini-image-model",
+            json_body={"contents": []},
+            count=2,
+            should_cancel=lambda: next(checks),
+        )
+
+
+@pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"n": 9}, "n 必须在"),
@@ -248,6 +393,9 @@ def test_generated_images_have_a_total_memory_limit(monkeypatch):
         ({"partial_images": 4}, "partial_images 必须在"),
         ({"prompt": "x" * (web_app.MAX_PROMPT_CHARS + 1)}, "提示词不能超过"),
         ({"model": "m" * (web_app.MAX_MODEL_CHARS + 1)}, "模型名不能超过"),
+        ({"protocol": "gemini", "model": ""}, "Gemini 模型名称不能为空"),
+        ({"protocol": "gemini", "model": "gemini-image", "aspect_ratio": "4:5"}, "aspect_ratio"),
+        ({"protocol": "gemini", "model": "gemini-image", "resolution": "8K"}, "resolution"),
     ],
 )
 def test_request_validation_enforces_bounds(overrides, message):

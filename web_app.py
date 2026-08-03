@@ -21,7 +21,7 @@ import webbrowser
 from collections.abc import Callable
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import ParseResult, urljoin, urlparse
+from urllib.parse import ParseResult, quote, urljoin, urlparse
 
 import requests
 from requests import RequestException
@@ -70,7 +70,7 @@ ROOT = app_root()
 WEB_ROOT = ROOT / "web"
 OPENAI_IMAGE_EDIT_FILE_FIELD = "image"
 OPENAI_IMAGE_EDIT_ARRAY_FIELD = "image[]"
-PROTOCOL_VALUES = {"auto", "openai", "grok"}
+PROTOCOL_VALUES = {"auto", "openai", "grok", "gemini"}
 JOB_TTL_SECONDS = 60 * 60
 MAX_JOB_RUNTIME_SECONDS = 15 * 60
 MAX_CONCURRENT_JOBS = 2
@@ -103,6 +103,8 @@ MAX_RETAINED_RAW_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
 MAX_EDIT_REFERENCE_IMAGES = 16
 MAX_GROK_VIDEO_REFERENCE_IMAGES = 7
+GEMINI_ASPECT_RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9"}
+GEMINI_IMAGE_SIZES = {"1K", "2K", "4K"}
 MAX_EMBED_ORIGINS = 32
 MAX_EMBED_ORIGINS_CHARS = 4096
 TERMINAL_JOB_STATUSES = {"success", "error", "cancelled"}
@@ -481,16 +483,57 @@ def compact_raw_response(data: dict) -> dict:
     return compact
 
 
+def compact_gemini_raw_response(data: dict) -> dict:
+    """Keep Gemini diagnostics while never retaining returned image bytes."""
+
+    def redact(value, parent_key: str = ""):
+        if isinstance(value, dict):
+            return {
+                key: "<omitted>"
+                if key == "data" and parent_key in {"inlineData", "inline_data"}
+                else redact(item, key)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item, parent_key) for item in value]
+        return value
+
+    sanitized = redact(data)
+    return compact_raw_response(sanitized if isinstance(sanitized, dict) else {})
+
+
 def resolve_image_protocol(protocol: str, model: str, base_url: str) -> str:
     value = str(protocol or "auto").strip().lower()
     if value not in PROTOCOL_VALUES:
-        raise ValueError("protocol 必须是 auto、openai 或 grok")
-    if value in {"openai", "grok"}:
+        raise ValueError("protocol 必须是 auto、openai、grok 或 gemini")
+    if value in {"openai", "grok", "gemini"}:
         return value
     base = str(base_url or "").lower()
     if is_grok_image_model(model) or is_grok_video_model(model) or "api.x.ai" in base or "x.ai" in base:
         return "grok"
+    if str(model or "").lower().startswith("gemini-") or "generativelanguage.googleapis.com" in base:
+        return "gemini"
     return "openai"
+
+
+def gemini_generate_endpoint(base_url: str, model: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    model_name = str(model or "").strip()
+    if not base:
+        raise ValueError("Base URL 不能为空")
+    if not model_name:
+        raise ValueError("Gemini 模型名称不能为空")
+    if base.endswith(":generateContent"):
+        return base
+
+    if model_name.startswith("models/"):
+        model_name = model_name[7:]
+    encoded_model = quote(model_name, safe="-._~")
+    parsed = urlparse(base)
+    last_segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    if last_segment not in {"v1", "v1beta", "v1alpha"}:
+        base += "/v1beta"
+    return f"{base}/models/{encoded_model}:generateContent"
 
 
 def data_url_from_bytes(data: bytes, mime: str) -> str:
@@ -749,6 +792,179 @@ def request_image_api(
         "images": images,
         "media": [{"type": "image", "url": image} for image in images],
         "raw": compact_raw_response(data),
+    }
+
+
+def build_gemini_request_body(payload: dict, prompt: str) -> dict:
+    aspect_ratio = payload_text(payload, "aspect_ratio") or "1:1"
+    image_size = payload_text(payload, "resolution").upper() or "1K"
+    if aspect_ratio not in GEMINI_ASPECT_RATIOS:
+        choices = ", ".join(sorted(GEMINI_ASPECT_RATIOS))
+        raise ValueError(f"Gemini aspect_ratio={aspect_ratio!r} 不支持，可选值: {choices}")
+    if image_size not in GEMINI_IMAGE_SIZES:
+        raise ValueError("Gemini resolution 必须是 1K、2K 或 4K")
+
+    parts: list[dict] = [{"text": prompt}]
+    if payload_text_lower(payload, "mode", "generate") == "edit":
+        for _name, image_bytes, content_type in decode_edit_image_payloads(payload):
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": content_type,
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                    }
+                }
+            )
+
+    return {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": aspect_ratio,
+                "imageSize": image_size,
+            },
+        },
+    }
+
+
+def parse_gemini_image_response(
+    data: dict,
+    client_request_id: str,
+    endpoint: str,
+) -> list[str]:
+    candidates = data.get("candidates")
+    images: list[str] = []
+    total_media_bytes = 0
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            parts = content.get("parts") if isinstance(content, dict) else None
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                inline_data = part.get("inlineData") or part.get("inline_data")
+                if not isinstance(inline_data, dict):
+                    continue
+                mime = str(inline_data.get("mimeType") or inline_data.get("mime_type") or "").strip().lower()
+                if not mime.startswith("image/"):
+                    continue
+                encoded = str(inline_data.get("data") or "")
+                image_bytes = decode_base64_limited(encoded, MAX_REMOTE_MEDIA_BYTES, "Gemini 上游图像")
+                total_media_bytes += len(image_bytes)
+                if total_media_bytes > MAX_GENERATED_MEDIA_BYTES:
+                    raise ValueError(f"生成结果总大小超过 {MAX_GENERATED_MEDIA_BYTES} 字节限制")
+                images.append(data_url_from_bytes(image_bytes, mime))
+                if len(images) >= MAX_UPSTREAM_MEDIA_ITEMS:
+                    return images
+
+    if not images:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "message": "Gemini 返回中没有可用的图片，可能被安全策略拦截或模型不支持生图",
+                    "client_request_id": client_request_id,
+                    "endpoint": endpoint,
+                    "raw": compact_gemini_raw_response(data),
+                },
+                ensure_ascii=False,
+            )
+        )
+    return images
+
+
+def request_gemini_image_api(
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    model: str,
+    *,
+    json_body: dict,
+    count: int,
+    should_cancel: CancelCheck = None,
+) -> dict:
+    if not api_key:
+        raise ValueError("API Key 不能为空")
+    endpoint = gemini_generate_endpoint(base_url, model)
+    client_request_id = str(uuid.uuid4())
+    started_at = time.time()
+    images: list[str] = []
+    raw_results: list[dict] = []
+    total_media_bytes = 0
+
+    for index in range(count):
+        raise_if_cancelled(should_cancel)
+        request_id = f"{client_request_id}-{index + 1}"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "x-goog-api-key": api_key,
+            "X-Client-Request-Id": request_id,
+            "Content-Type": "application/json",
+        }
+        try:
+            response = safe_http_request(
+                "POST",
+                endpoint,
+                headers=headers,
+                json=json_body,
+                timeout=timeout,
+                stream=True,
+            )
+        except RequestException as exc:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "message": "Gemini 图片请求失败",
+                        "last_endpoint": endpoint,
+                        "client_request_id": client_request_id,
+                        "diagnostics": [exception_diagnostic(endpoint, exc)],
+                    },
+                    ensure_ascii=False,
+                )
+            ) from exc
+
+        if not response.ok or "text/html" in response.headers.get("Content-Type", "").lower():
+            diagnostic = response_diagnostic(endpoint, response)
+            message = preview_response_body(response) or "Gemini 图片请求失败"
+            response.close()
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "message": message,
+                        "last_endpoint": endpoint,
+                        "client_request_id": client_request_id,
+                        "diagnostics": [diagnostic],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        try:
+            data = response_json_limited(response)
+        finally:
+            response.close()
+        call_images = parse_gemini_image_response(data, request_id, endpoint)
+        image = call_images[0]
+        total_media_bytes += data_url_payload_size(image)
+        if total_media_bytes > MAX_GENERATED_MEDIA_BYTES:
+            raise ValueError(f"生成结果总大小超过 {MAX_GENERATED_MEDIA_BYTES} 字节限制")
+        images.append(image)
+        raw_results.append(compact_gemini_raw_response(data))
+
+    duration_ms = int((time.time() - started_at) * 1000)
+    return {
+        "ok": True,
+        "media_type": "image",
+        "endpoint": endpoint,
+        "client_request_id": client_request_id,
+        "duration_ms": duration_ms,
+        "images": images,
+        "media": [{"type": "image", "url": image} for image in images],
+        "raw": raw_results[0] if len(raw_results) == 1 else raw_results,
     }
 
 
@@ -1281,13 +1497,24 @@ def generate_images(payload: dict, *, should_cancel: CancelCheck = None) -> dict
     prompt = str(payload.get("prompt", "")).strip()
     raw_model = str(payload.get("model", "")).strip()
     protocol = resolve_image_protocol(payload_text(payload, "protocol", "auto"), raw_model, base_url)
-    model = raw_model or ("grok-imagine-image" if protocol == "grok" else DEFAULT_IMAGE_MODEL)
+    model = raw_model or ("grok-imagine-image" if protocol == "grok" else "" if protocol == "gemini" else DEFAULT_IMAGE_MODEL)
     size = str(payload.get("size", "1024x1024")).strip() or "1024x1024"
     timeout = bounded_payload_int(payload, "timeout", DEFAULT_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
     image_count = bounded_payload_int(payload, "n", 1, 1, MAX_IMAGE_COUNT)
 
     if not prompt:
         raise ValueError("提示词不能为空")
+    if protocol == "gemini":
+        request_body = build_gemini_request_body(payload, prompt)
+        return request_gemini_image_api(
+            base_url,
+            api_key,
+            timeout,
+            model,
+            json_body=request_body,
+            count=image_count,
+            should_cancel=should_cancel,
+        )
     if protocol == "grok":
         request_body = build_grok_generation_body(payload, model, prompt, size, image_count)
     else:
@@ -1401,13 +1628,26 @@ def edit_images(payload: dict, *, should_cancel: CancelCheck = None) -> dict:
     prompt = str(payload.get("prompt", "")).strip()
     raw_model = str(payload.get("model", "")).strip()
     protocol = resolve_image_protocol(payload_text(payload, "protocol", "auto"), raw_model, base_url)
-    model = normalize_edit_model(raw_model or ("grok-imagine-image" if protocol == "grok" else DEFAULT_IMAGE_MODEL))
+    model = normalize_edit_model(
+        raw_model or ("grok-imagine-image" if protocol == "grok" else "" if protocol == "gemini" else DEFAULT_IMAGE_MODEL)
+    )
     size = str(payload.get("size", "1024x1024")).strip() or "1024x1024"
     timeout = bounded_payload_int(payload, "timeout", DEFAULT_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
     image_count = bounded_payload_int(payload, "n", 1, 1, MAX_IMAGE_COUNT)
 
     if not prompt:
         raise ValueError("图生图模式下提示词不能为空")
+    if protocol == "gemini":
+        request_body = build_gemini_request_body(payload, prompt)
+        return request_gemini_image_api(
+            base_url,
+            api_key,
+            timeout,
+            model,
+            json_body=request_body,
+            count=image_count,
+            should_cancel=should_cancel,
+        )
     if protocol == "grok":
         request_body = build_grok_edit_body(payload, model, prompt, size, image_count)
         return request_image_api(
@@ -1448,7 +1688,7 @@ def build_stream_request(payload: dict) -> tuple[str, str, int, str, dict | None
     if is_video_payload(payload, raw_model):
         raise ValueError("grok-imagine-video 是异步视频任务，请使用普通生成或异步生成接口")
     protocol = resolve_image_protocol(payload_text(payload, "protocol", "auto"), raw_model, base_url)
-    model = raw_model or ("grok-imagine-image" if protocol == "grok" else DEFAULT_IMAGE_MODEL)
+    model = raw_model or ("grok-imagine-image" if protocol == "grok" else "" if protocol == "gemini" else DEFAULT_IMAGE_MODEL)
     size = str(payload.get("size", "1024x1024")).strip() or "1024x1024"
     timeout = bounded_payload_int(payload, "timeout", DEFAULT_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
     image_count = bounded_payload_int(payload, "n", 1, 1, MAX_IMAGE_COUNT)
@@ -1456,6 +1696,8 @@ def build_stream_request(payload: dict) -> tuple[str, str, int, str, dict | None
 
     if not prompt:
         raise ValueError("图生图模式下提示词不能为空" if mode == "edit" else "提示词不能为空")
+    if protocol == "gemini":
+        raise ValueError("Gemini 生图使用异步任务接口，不支持 SSE 流式接口")
     if mode == "generate":
         if protocol == "grok":
             request_body = build_grok_generation_body(payload, model, prompt, size, image_count)
@@ -1541,7 +1783,16 @@ def validate_request_payload(payload: dict) -> None:
     is_video = mode == "video" or is_grok_video_model(raw_model)
     bounded_payload_int(payload, "n", 1, 1, MAX_VIDEO_COUNT if is_video else MAX_IMAGE_COUNT)
     bounded_payload_int(payload, "timeout", DEFAULT_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
-    resolve_image_protocol(payload_text(payload, "protocol", "auto"), raw_model, base_url)
+    protocol = resolve_image_protocol(payload_text(payload, "protocol", "auto"), raw_model, base_url)
+    if protocol == "gemini" and not raw_model:
+        raise ValueError("Gemini 模型名称不能为空")
+    if protocol == "gemini":
+        aspect_ratio = payload_text(payload, "aspect_ratio") or "1:1"
+        image_size = payload_text(payload, "resolution").upper() or "1K"
+        if aspect_ratio not in GEMINI_ASPECT_RATIOS:
+            raise ValueError("Gemini aspect_ratio 不支持")
+        if image_size not in GEMINI_IMAGE_SIZES:
+            raise ValueError("Gemini resolution 必须是 1K、2K 或 4K")
     if mode == "edit":
         images = get_edit_image_payloads(payload)
         total_bytes = 0

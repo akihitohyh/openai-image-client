@@ -8,7 +8,6 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -411,89 +410,6 @@ class AssetStore:
             "content_type": asset.mime_type,
             "data_url": f"data:{asset.mime_type};base64,{base64.b64encode(data).decode('ascii')}",
         }
-
-    def delete(self, asset_id: str) -> int:
-        """Remove an asset and release its bytes. Returns the bytes reclaimed."""
-        normalized = self._asset_id(asset_id)
-        metadata_path = self._metadata_path(normalized)
-        with self._lock:
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                return 0
-            except (OSError, json.JSONDecodeError):
-                metadata = {}
-            reclaimed = 0
-            file_name = str(metadata.get("file_name", ""))
-            if file_name:
-                path = (self.root / file_name).resolve()
-                try:
-                    path.relative_to(self.root)
-                except ValueError:
-                    path = None  # metadata points outside the store; never touch it
-                if path is not None:
-                    try:
-                        reclaimed = path.stat().st_size
-                    except OSError:
-                        reclaimed = 0
-                    try:
-                        path.unlink(missing_ok=True)
-                    except OSError as exc:
-                        raise AssetError("asset storage is unavailable") from exc
-            try:
-                metadata_path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise AssetError("asset storage is unavailable") from exc
-            # Never let the counters drift below zero if the file vanished behind us.
-            reclaimed = min(reclaimed, self._stored_bytes)
-            self._stored_bytes -= reclaimed
-            if self.shared_quota is not None and reclaimed:
-                try:
-                    self.shared_quota.release(reclaimed)
-                except ValueError:
-                    pass
-            return reclaimed
-
-    def delete_many(self, asset_ids: Iterable[str]) -> int:
-        total = 0
-        for asset_id in asset_ids:
-            try:
-                total += self.delete(asset_id)
-            except AssetError:
-                continue
-        return total
-
-    def prune(self, *, max_age_seconds: float | None = None, now: float | None = None) -> int:
-        """Evict assets past their TTL, then oldest-first until under the store cap."""
-        current = time.time() if now is None else now
-        with self._lock:
-            entries: list[tuple[float, str]] = []
-            for path in self.root.glob("*.json"):
-                try:
-                    entries.append((path.stat().st_mtime, path.stem))
-                except OSError:
-                    continue
-            entries.sort(key=lambda item: item[0])
-            reclaimed = 0
-            if max_age_seconds is not None:
-                for mtime, asset_id in list(entries):
-                    if current - mtime <= max_age_seconds:
-                        break
-                    try:
-                        reclaimed += self.delete(asset_id)
-                    except AssetError:
-                        continue
-                    entries.remove((mtime, asset_id))
-            # Keep headroom so a full store cannot permanently reject new writes.
-            target = int(self.max_store_bytes * 0.9)
-            for mtime, asset_id in entries:
-                if self._stored_bytes <= target:
-                    break
-                try:
-                    reclaimed += self.delete(asset_id)
-                except AssetError:
-                    continue
-            return reclaimed
 
     def list(self, limit: int = 100) -> list[Asset]:
         assets: list[Asset] = []

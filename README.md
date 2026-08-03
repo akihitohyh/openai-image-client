@@ -2,7 +2,7 @@
 
 [English README](README_EN.md)
 
-一个面向 OpenAI Images API 与 xAI Grok Imagine 兼容服务的图片/视频客户端，提供四种入口：
+一个面向 OpenAI Images API、Google Gemini 原生生图协议与 xAI Grok Imagine 兼容服务的图片/视频客户端，提供四种入口：
 
 - Python CLI
 - 本地 Web UI
@@ -14,23 +14,14 @@
 ## 功能概览
 
 - OpenAI-compatible `images/generations` 与 `images/edits`
+- Web UI 支持 Gemini 原生 `models/{model}:generateContent` 文生图与图生图
 - Grok Imagine 图片与异步视频任务
-- OpenAI/Grok 协议感知的 Web 控件
+- OpenAI/Gemini/Grok 协议感知的 Web 控件
 - Web 异步 job、状态轮询、取消和当前页面任务历史
 - Web UI 默认支持跨来源 iframe 嵌入，并可按父页面 origin 收紧
 - Base64 或远端 URL 媒体结果
 - 私网上游默认拒绝，支持精确主机白名单
 - MCP named profile、受控本地图片导入、远程租户隔离、资源链接和有界任务队列
-
-## 本次更新
-
-- 抽取 `image_client_core/`，统一 CLI、Web 与 MCP 共用的端点、模型和响应解析逻辑
-- Web 任务支持取消排队任务与轮询阶段、有限队列、HTTP/1.1 keep-alive、连接复用和不可变结果缓存
-- 修复 MCP 任务取消、过期或淘汰后的结果资产与磁盘配额泄漏
-- 前端减少历史区重复渲染和媒体重复下载，参考图只在提交时编码
-- 加强 Base64、响应体大小、SSRF、认证、请求体和错误响应校验
-
-完整的审查结果、行为变化和验证记录见 [OPTIMIZATION.md](OPTIMIZATION.md)。
 
 ## 项目结构
 
@@ -49,7 +40,6 @@
 ├── config.json.example           # CLI 示例配置
 ├── mcp-config.example.json       # MCP named profile 示例
 ├── mcp-http-auth.example.json    # HTTP 租户认证示例
-├── OPTIMIZATION.md               # 本轮审查、修复与验证记录
 ├── requirements.txt              # CLI/Web 依赖
 ├── requirements-mcp.txt          # MCP 运行依赖
 ├── requirements-dev.txt          # 测试与打包依赖
@@ -133,6 +123,37 @@ python web_app.py
 
 默认只监听 `http://127.0.0.1:8000`。如果端口占用，会尝试后续端口；使用 `--strict-port` 可关闭该行为。
 
+### Gemini 原生生图
+
+在 Web UI 中选择“Gemini 生图”，填写 Base URL、API Key 和模型名称。模型名称不会固定，可以填写官方模型或兼容代理提供的模型标识。
+
+Base URL 支持以下形式：
+
+```text
+https://generativelanguage.googleapis.com/v1beta
+https://gemini-proxy.example/v1beta
+https://gemini-proxy.example/v1beta/models/custom-model:generateContent
+```
+
+未包含 API 版本的 Base URL 会自动补 `/v1beta`。请求同时携带 `x-goog-api-key` 和 `Authorization: Bearer`，用于兼容 Google 官方接口和使用 Bearer Token 的 Gemini 协议代理。跨来源重定向仍会被拒绝，防止凭据被转发到其他主机。
+
+文生图和图生图都使用原生 `generateContent` 请求。提示词和参考图放入 `contents[].parts`，参考图使用 `inlineData`；生成配置使用 `responseModalities: ["TEXT", "IMAGE"]` 以及 `imageConfig.aspectRatio` 和 `imageConfig.imageSize`。
+
+Gemini 与“其他模型”共享以下尺寸选项，4K 档不会超过横向 `3840x2160` 或纵向 `2160x3840`：
+
+| 比例 | 1K | 2K | 4K |
+| --- | --- | --- | --- |
+| 1:1 | 1024x1024 | 2048x2048 | 2160x2160 |
+| 3:4 | 864x1152 | 1728x2304 | 2160x2880 |
+| 4:3 | 1152x864 | 2304x1728 | 2880x2160 |
+| 16:9 | 1312x736 | 2624x1472 | 3840x2160 |
+| 9:16 | 736x1312 | 1472x2624 | 2160x3840 |
+| 2:3 | 832x1248 | 1664x2496 | 2160x3240 |
+| 3:2 | 1248x832 | 2496x1664 | 3240x2160 |
+| 21:9 | 1568x672 | 3136x1344 | 3808x1632 |
+
+界面显示实际像素参考值，原生请求发送对应的 `1K`、`2K` 或 `4K` 档位。生成数量 `n` 大于 1 时，服务按顺序调用上游 `n` 次，每次取第一张有效图片，因此会产生 `n` 次上游请求和相应计费。Gemini 原生协议当前只在 Web UI 和 Web 异步任务 API 中启用；CLI 与 MCP 的协议范围保持不变。
+
 ### Web 工作方式
 
 1. 前端向 `POST /api/generate-async` 创建 job。
@@ -161,6 +182,7 @@ python web_app.py
 | 图片数量 | 1-8 |
 | 视频数量 | 1-4 |
 | OpenAI 编辑参考图 | 最多 16 张 |
+| Gemini 参考图 | 最多 16 张，仍受 30 MiB 总限制 |
 | Grok 图片参考图 | 最多 3 张 |
 | Grok 视频参考图 | 最多 7 张 |
 | 上游超时 | 5-600 秒 |
@@ -465,6 +487,7 @@ HTTP 专用变量：
 | `OPENAI_IMAGE_MCP_HTTP_GLOBAL_IO_CONCURRENCY` | `8`，1-64 | 所有租户共享的阻塞 I/O 并发上限 |
 | `OPENAI_IMAGE_MCP_HTTP_TENANT_IO_CONCURRENCY` | `2`，1-16 | 单租户阻塞 I/O 并发上限 |
 | `OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS` | `128`，1-1024 | 同时处理的 `/mcp` HTTP 请求上限 |
+| `OPENAI_IMAGE_MCP_HTTP_TENANT_INFLIGHT_REQUESTS` | `min(16, 全局上限)`，1-全局上限 | 单租户及未认证流量的 `/mcp` 在途请求上限 |
 | `OPENAI_IMAGE_MCP_HTTP_GLOBAL_ASSET_STORE_BYTES` | `max(10 GiB, max_asset_store_bytes)`，1 MiB-1 TiB | 所有 HTTP 租户合计的 asset 磁盘配额 |
 | `OPENAI_IMAGE_MCP_HTTP_LOG_LEVEL` | `INFO` | `DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 
@@ -481,11 +504,11 @@ HTTP 模式按租户隔离 runtime、job、asset 和输出目录，并执行 pro
 #### 容量、配额与持久化
 
 - `OPENAI_IMAGE_MCP_HTTP_MAX_RESOURCE_BYTES` 只限制远程 `image-client://assets/{asset_id}` 的单次二进制响应；超限 asset 仍保存在磁盘并占用配额，但远程资源读取会失败。
-- 生成任务使用共享 worker/queue，并同时执行自动的每租户在途任务上限。单租户配置可使用全部 `workers + queue`；多租户配置中每个租户最多占用 `min(workers, max(1, workers + queue - 1))` 个运行或排队槽位，因此总容量大于 1 时，一个租户不能耗尽全局队列。`1 worker / 0 queue` 没有可预留槽位，必须增加 queue 才能让另一租户在首个任务运行时继续提交。上传、asset/resource 读取和状态操作等阻塞工作同时受全局及每租户 I/O 并发限制。`OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS` 再限制整个 `/mcp` HTTP 请求层的在途数量。
+- 生成任务使用共享 worker/queue，并同时执行自动的每租户在途任务上限。单租户配置可使用全部 `workers + queue`；多租户配置中每个租户最多占用 `min(workers, max(1, workers + queue - 1))` 个运行或排队槽位，因此总容量大于 1 时，一个租户不能耗尽全局队列。`1 worker / 0 queue` 没有可预留槽位，必须增加 queue 才能让另一租户在首个任务运行时继续提交。上传、asset/resource 读取和状态操作等阻塞工作同时受全局及每租户 I/O 并发限制。HTTP 请求层先获取每租户槽位，再获取全局槽位，长期 GET/SSE 连接因此不能独占全部全局容量；未认证或无效凭据流量共同使用同样受限的独立桶。
 - 每个租户受 `max_asset_store_bytes`（或 `OPENAI_IMAGE_MCP_MAX_ASSET_STORE_BYTES`）限制，所有租户还共同受 `OPENAI_IMAGE_MCP_HTTP_GLOBAL_ASSET_STORE_BYTES` 限制；任一配额耗尽都会拒绝新 asset 写入。
-- job registry、job TTL 元数据和两层 RPM 窗口都在内存中，服务重启会丢失 job 状态并重置限流窗口。正常运行时，生成结果会在 job 取消、TTL 过期或注册表淘汰时自动删除并释放配额；独立上传的参考图以及异常退出遗留的孤儿 asset 不会自动清理，并会跨重启继续占用每租户及全局配额。
+- job registry、job TTL 元数据和两层 RPM 窗口都在内存中，服务重启会丢失 job 状态并重置限流窗口。上传和生成的 asset 文件不会随 job TTL 自动删除，也没有自动 asset TTL；它们跨重启持久存在并持续占用每租户及全局配额。
 
-应监控输出目录容量并制定保留策略。`MCPRuntime.prune_assets()` 可按 job TTL 回收异常退出遗留的孤儿 asset，但当前不会自动调度；生产部署可在停服维护或受控运维任务中调用。若手动清理，先停止服务，成对删除不再需要的 asset 数据与对应 metadata，再重新启动以扫描现存字节并重算全局及每租户配额。不要在服务运行时直接删除文件，否则内存计数不会同步。
+应监控输出目录容量并制定保留策略。需要清理时先停止服务，成对删除不再需要的 asset 数据与对应 metadata，然后重新启动；启动及租户 runtime 初始化时会重新扫描现存 asset 字节，并重算全局及每租户配额。不要在服务运行时直接删除文件，否则内存计数不会同步。
 
 #### systemd 单 worker 服务
 
@@ -674,7 +697,7 @@ tool_timeout_sec = 700
 - profile 固定 `base_url` 并设置 `allowed_models`
 - 远程 MCP 为每个租户使用唯一 Token、最小 scopes/profile/双层 RPM，并将认证文件设为 `0600`
 - Web 和 HTTP MCP 保持默认回环监听；远程使用时通过可信反向代理增加 TLS 和入口认证
-- 监控每租户及全局 asset 配额；为上传资产和异常退出遗留资产安排受控清理
+- 监控每租户及全局 asset 配额；asset 没有自动 TTL，按停服、清理、重启重算的流程维护
 - 只精确放行需要的私网上游主机
 - 泄露或曾写入仓库/浏览器存储的 Key 应立即轮换
 

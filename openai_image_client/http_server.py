@@ -55,6 +55,7 @@ class MCPHTTPSettings:
     global_io_concurrency: int
     tenant_io_concurrency: int
     max_inflight_requests: int
+    tenant_inflight_requests: int
     global_asset_store_bytes: int
     log_level: str
 
@@ -146,17 +147,54 @@ class RequestBodyLimitMiddleware:
 
 
 class RequestConcurrencyLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_inflight: int, path: str = MCP_PATH) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        max_inflight: int,
+        path: str = MCP_PATH,
+        *,
+        verifier: StaticTenantTokenVerifier | None = None,
+        tenant_ids: tuple[str, ...] = (),
+        max_tenant_inflight: int | None = None,
+    ) -> None:
         self.app = app
         self.path = path
-        self._limiter = anyio.Semaphore(max_inflight)
+        self.verifier = verifier
+        self._global_limiter = anyio.Semaphore(max_inflight)
+        tenant_limit = max_tenant_inflight or max_inflight
+        self._tenant_limiters = {
+            tenant_id: anyio.Semaphore(tenant_limit) for tenant_id in tenant_ids
+        }
+        self._unauthenticated_limiter = anyio.Semaphore(tenant_limit)
+
+    async def _request_limiter(self, scope: Scope) -> anyio.Semaphore | None:
+        if self.verifier is None:
+            return None
+        authorization = Headers(scope=scope).get("authorization", "")
+        if not authorization.lower().startswith("bearer "):
+            return self._unauthenticated_limiter
+        access_token = await self.verifier.verify_token(authorization[7:])
+        if access_token is None:
+            return self._unauthenticated_limiter
+        return self._tenant_limiters.get(
+            access_token.subject,
+            self._unauthenticated_limiter,
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") != self.path:
             await self.app(scope, receive, send)
             return
-        async with self._limiter:
-            await self.app(scope, receive, send)
+        tenant_limiter = await self._request_limiter(scope)
+        if tenant_limiter is None:
+            async with self._global_limiter:
+                await self.app(scope, receive, send)
+            return
+        # Acquire the tenant slot first so requests waiting on their own quota
+        # cannot consume every global slot.
+        async with tenant_limiter:
+            async with self._global_limiter:
+                await self.app(scope, receive, send)
 
 
 class TenantOperationRateLimitMiddleware:
@@ -417,6 +455,20 @@ def load_http_settings(
     log_level = str(env.get("OPENAI_IMAGE_MCP_HTTP_LOG_LEVEL", "INFO")).strip().upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise ConfigurationError("OPENAI_IMAGE_MCP_HTTP_LOG_LEVEL is invalid")
+    max_inflight_requests = _bounded_int(
+        env.get("OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS"),
+        default=128,
+        minimum=1,
+        maximum=1024,
+        name="OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS",
+    )
+    tenant_inflight_requests = _bounded_int(
+        env.get("OPENAI_IMAGE_MCP_HTTP_TENANT_INFLIGHT_REQUESTS"),
+        default=min(16, max_inflight_requests),
+        minimum=1,
+        maximum=max_inflight_requests,
+        name="OPENAI_IMAGE_MCP_HTTP_TENANT_INFLIGHT_REQUESTS",
+    )
     return MCPHTTPSettings(
         host=host,
         port=port,
@@ -462,13 +514,8 @@ def load_http_settings(
             maximum=16,
             name="OPENAI_IMAGE_MCP_HTTP_TENANT_IO_CONCURRENCY",
         ),
-        max_inflight_requests=_bounded_int(
-            env.get("OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS"),
-            default=128,
-            minimum=1,
-            maximum=1024,
-            name="OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS",
-        ),
+        max_inflight_requests=max_inflight_requests,
+        tenant_inflight_requests=tenant_inflight_requests,
         global_asset_store_bytes=_bounded_int(
             env.get("OPENAI_IMAGE_MCP_HTTP_GLOBAL_ASSET_STORE_BYTES"),
             default=max(
@@ -629,6 +676,9 @@ def create_http_application(
             RequestConcurrencyLimitMiddleware,
             max_inflight=settings.max_inflight_requests,
             path=MCP_PATH,
+            verifier=verifier,
+            tenant_ids=tuple(auth_config.grants_by_tenant),
+            max_tenant_inflight=settings.tenant_inflight_requests,
         )
         if settings.allowed_origins:
             app.add_middleware(

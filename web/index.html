@@ -21,9 +21,9 @@
                 <div class="min-w-0">
                     <div class="flex items-center gap-2">
                         <h1 class="font-semibold text-sm text-zinc-100 tracking-tight truncate">图像 / 视频生成工作台</h1>
-                        <span class="hidden sm:inline text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/[0.06] text-zinc-500 border border-white/10">v1.2</span>
+                        <span class="hidden sm:inline text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/[0.06] text-zinc-500 border border-white/10">v1.3</span>
                     </div>
-                    <p class="text-[11px] text-zinc-600 truncate hidden sm:block">OpenAI · Grok 图像与视频统一控制台</p>
+                    <p class="text-[11px] text-zinc-600 truncate hidden sm:block">OpenAI · Gemini · Grok · 兼容模型图像与视频统一控制台</p>
                 </div>
             </div>
             <div id="service-status" class="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 shrink-0" role="status" aria-live="polite">正在连接后端...</div>
@@ -59,10 +59,12 @@
                 <fieldset>
                     <legend class="field-label">协议 (Protocol)</legend>
                     <input type="hidden" id="protocol" value="openai-image">
-                    <div id="protocol-control" class="segment grid-cols-1 sm:grid-cols-3">
+                    <div id="protocol-control" class="segment grid-cols-2">
                         <button type="button" id="protocol-openai-image" data-protocol="openai-image" aria-pressed="true" class="text-xs py-2 rounded-lg font-medium text-center bg-white/[0.09] text-zinc-100 shadow-sm transition">OpenAI 生图</button>
+                        <button type="button" id="protocol-gemini-image" data-protocol="gemini-image" aria-pressed="false" class="text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">Gemini 生图</button>
                         <button type="button" id="protocol-grok-image" data-protocol="grok-image" aria-pressed="false" class="text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">Grok 生图</button>
                         <button type="button" id="protocol-grok-video" data-protocol="grok-video" aria-pressed="false" class="text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">Grok 视频</button>
+                        <button type="button" id="protocol-custom-image" data-protocol="custom-image" data-full-span="true" aria-pressed="false" class="col-span-2 text-xs py-2 rounded-lg font-medium text-center text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] transition">其他模型</button>
                     </div>
                 </fieldset>
 
@@ -96,7 +98,7 @@
                         class="field resize-none leading-relaxed"></textarea>
                 </div>
 
-                <div class="grid grid-cols-2 gap-3">
+                <div id="preset-image-options" class="grid grid-cols-2 gap-3">
                     <div>
                         <label for="model" class="field-label">模型 (Model)</label>
                         <select id="model" class="field">
@@ -112,6 +114,36 @@
                             <option value="1920x1072">1920x1072</option>
                             <option value="1072x1920">1072x1920</option>
                         </select>
+                    </div>
+                </div>
+
+                <div id="custom-image-options" class="hidden space-y-3 animate-fade-in">
+                    <div>
+                        <label for="custom_model" class="field-label">模型名称 (Model)</label>
+                        <input type="text" id="custom_model" maxlength="200" spellcheck="false" autocomplete="off" placeholder="例如: flux-1.1-pro" class="field font-mono">
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label for="custom_ratio" class="field-label">画幅比例</label>
+                            <select id="custom_ratio" class="field">
+                                <option value="1:1">1:1</option>
+                                <option value="3:4">3:4</option>
+                                <option value="4:3">4:3</option>
+                                <option value="16:9">16:9</option>
+                                <option value="9:16">9:16</option>
+                                <option value="2:3">2:3</option>
+                                <option value="3:2">3:2</option>
+                                <option value="21:9">21:9</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="custom_resolution" class="field-label">输出尺寸</label>
+                            <select id="custom_resolution" class="field font-mono">
+                                <option value="1K">1K · 1024x1024</option>
+                                <option value="2K">2K · 2048x2048</option>
+                                <option value="4K">4K · 2160x2160</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 

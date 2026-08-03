@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 
 const indexHtml = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 const appJs = await readFile(new URL('./app.js', import.meta.url), 'utf8');
@@ -67,4 +68,68 @@ test('mobile layout keeps the result panel reachable', () => {
   assert.match(indexHtml, /overflow-y-visible md:overflow-hidden/);
   assert.match(indexHtml, /overflow-y-visible md:overflow-y-auto/);
   assert.match(indexHtml, /min-h-\[520px\] md:min-h-0/);
+});
+
+test('custom OpenAI-compatible model UI is available', () => {
+  assert.match(indexHtml, /data-protocol="custom-image"[^>]*>其他模型</);
+  assert.match(indexHtml, /id="custom_model"[^>]+maxlength="200"/);
+  assert.match(indexHtml, /id="custom_ratio"/);
+  assert.match(indexHtml, /id="custom_resolution"/);
+  assert.match(appJs, /'custom-image': \{[\s\S]*?backendProtocol: 'openai'/);
+  assert.match(appJs, /if \(!payload\.model\) return '请输入模型名称'/);
+});
+
+test('Gemini native image protocol reuses manual model and UHD controls', () => {
+  assert.match(indexHtml, /data-protocol="gemini-image"[^>]*>Gemini 生图</);
+  assert.match(appJs, /'gemini-image': \{[\s\S]*?backendProtocol: 'gemini'/);
+  assert.match(appJs, /'gemini-image': \{[\s\S]*?usesCustomModel: true/);
+  assert.match(appJs, /payload\.aspect_ratio = els\.custom_ratio\.value/);
+  assert.match(appJs, /payload\.resolution = els\.custom_resolution\.value/);
+  assert.match(appJs, /countLabel: '生成张数 \(逐次请求\)'/);
+  assert.match(indexHtml, /data-protocol="custom-image"[^>]+data-full-span="true"/);
+  assert.match(appJs, /button\.dataset\.fullSpan === 'true'/);
+});
+
+test('custom ratio and resolution tiers map to the required output sizes', () => {
+  const source = appJs.match(
+    /const CUSTOM_SIZE_MATRIX = ([\s\S]*?);\nconst CUSTOM_RESOLUTION_TIERS/,
+  )?.[1];
+  assert.ok(source, 'CUSTOM_SIZE_MATRIX must exist');
+  const matrix = vm.runInNewContext(`(${source})`);
+  assert.deepEqual(JSON.parse(JSON.stringify(matrix)), {
+    '1:1': ['1024x1024', '2048x2048', '2160x2160'],
+    '3:4': ['864x1152', '1728x2304', '2160x2880'],
+    '4:3': ['1152x864', '2304x1728', '2880x2160'],
+    '16:9': ['1312x736', '2624x1472', '3840x2160'],
+    '9:16': ['736x1312', '1472x2624', '2160x3840'],
+    '2:3': ['832x1248', '1664x2496', '2160x3240'],
+    '3:2': ['1248x832', '2496x1664', '3240x2160'],
+    '21:9': ['1568x672', '3136x1344', '3808x1632'],
+  });
+  assert.match(appJs, /const CUSTOM_RESOLUTION_TIERS = \['1K', '2K', '4K'\]/);
+  assert.match(appJs, /parsed\.customResolution === '3K' \? '4K' : parsed\.customResolution/);
+  assert.match(appJs, /size: getRequestSize\(\)/);
+
+  for (const [ratio, sizes] of Object.entries(matrix)) {
+    const [ratioWidth, ratioHeight] = ratio.split(':').map(Number);
+    for (const size of sizes) {
+      const [width, height] = size.split('x').map(Number);
+      if (ratioWidth >= ratioHeight) {
+        assert.ok(width <= 3840 && height <= 2160, `${ratio} ${size} exceeds the UHD limit`);
+      } else {
+        assert.ok(width <= 2160 && height <= 3840, `${ratio} ${size} exceeds the portrait UHD limit`);
+      }
+    }
+  }
+});
+
+test('custom model settings are persisted without changing existing model settings', () => {
+  const persistBody = appJs.match(/function persistSettings\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(persistBody, /customModel: els\.custom_model\.value\.trim\(\)/);
+  assert.match(persistBody, /customRatio: els\.custom_ratio\.value/);
+  assert.match(persistBody, /customResolution: els\.custom_resolution\.value/);
+  assert.match(
+    appJs,
+    /getProtocolConfig\(\)\.usesCustomModel \? els\.custom_model\.value\.trim\(\) : els\.model\.value/,
+  );
 });

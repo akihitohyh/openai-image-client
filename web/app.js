@@ -11,6 +11,18 @@ const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_REFERENCE_IMAGES_TOTAL_BYTES = 30 * 1024 * 1024;
 const ALLOWED_REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
+const CUSTOM_SIZE_MATRIX = {
+  '1:1': ['1024x1024', '2048x2048', '2160x2160'],
+  '3:4': ['864x1152', '1728x2304', '2160x2880'],
+  '4:3': ['1152x864', '2304x1728', '2880x2160'],
+  '16:9': ['1312x736', '2624x1472', '3840x2160'],
+  '9:16': ['736x1312', '1472x2624', '2160x3840'],
+  '2:3': ['832x1248', '1664x2496', '2160x3240'],
+  '3:2': ['1248x832', '2496x1664', '3240x2160'],
+  '21:9': ['1568x672', '3136x1344', '3808x1632'],
+};
+const CUSTOM_RESOLUTION_TIERS = ['1K', '2K', '4K'];
+
 const PROTOCOL_CONFIG = {
   'openai-image': {
     backendProtocol: 'openai',
@@ -75,6 +87,52 @@ const PROTOCOL_CONFIG = {
     maxOutputs: 4,
     isVideo: true,
   },
+  'custom-image': {
+    backendProtocol: 'openai',
+    defaultModel: '',
+    models: [],
+    description: '使用 OpenAI 兼容的 Images API，并将自定义模型名称和输出尺寸原样发送给上游。',
+    promptPlaceholder: '例如: A professional minimalist workspace, cinematic lighting...',
+    promptLabel: '提示词 (Prompt)',
+    generateLabel: '文生图 (Generate)',
+    editLabel: '图生图 (Edit)',
+    modeLabel: '作业模式',
+    referenceLabel: '参考图 (OpenAI 兼容接口最多 16 张)',
+    uploadPlaceholder: '点击选择或追加参考图像',
+    sizeLabel: '分辨率 (Size)',
+    countLabel: '生成张数 (n)',
+    timeoutLabel: '超时断开 (秒)',
+    submitText: '发送生图请求',
+    waitingText: '正在等待图片异步任务',
+    maxReferenceImages: OPENAI_MAX_REFERENCE_IMAGES,
+    maxOutputs: 8,
+    isVideo: false,
+    usesCustomModel: true,
+    modelPlaceholder: '例如: flux-1.1-pro',
+  },
+  'gemini-image': {
+    backendProtocol: 'gemini',
+    defaultModel: '',
+    models: [],
+    description: '使用 Gemini 原生 generateContent 生图协议，模型名称由用户填写。',
+    promptPlaceholder: '例如: A cinematic editorial portrait with natural window light...',
+    promptLabel: '提示词 (Prompt)',
+    generateLabel: '文生图 (Generate)',
+    editLabel: '图生图 (Edit)',
+    modeLabel: '作业模式',
+    referenceLabel: '参考图 (Gemini 最多 16 张)',
+    uploadPlaceholder: '点击选择或追加 Gemini 参考图像',
+    sizeLabel: '输出尺寸',
+    countLabel: '生成张数 (逐次请求)',
+    timeoutLabel: '单次超时 (秒)',
+    submitText: '发送 Gemini 生图请求',
+    waitingText: '正在等待 Gemini 图片异步任务',
+    maxReferenceImages: OPENAI_MAX_REFERENCE_IMAGES,
+    maxOutputs: 8,
+    isVideo: false,
+    usesCustomModel: true,
+    modelPlaceholder: '例如: gemini-2.5-flash-image',
+  },
 };
 
 const DEFAULT_SETTINGS = {
@@ -87,6 +145,9 @@ const DEFAULT_SETTINGS = {
   timeout: 500,
   videoResolution: '720p',
   duration: 10,
+  customModel: '',
+  customRatio: '1:1',
+  customResolution: '1K',
 };
 
 const els = Object.fromEntries([
@@ -94,7 +155,8 @@ const els = Object.fromEntries([
   'protocol-desc', 'mode-control', 'mode-label', 'mode-generate', 'mode-edit',
   'edit-image-container', 'reference-label', 'reference-dropzone', 'file-input',
   'upload-placeholder', 'upload-preview-grid', 'upload-count', 'clear-upload-btn',
-  'prompt-label', 'prompt', 'model', 'size-label', 'size', 'video-options',
+  'prompt-label', 'prompt', 'model', 'size-label', 'size', 'preset-image-options',
+  'custom-image-options', 'custom_model', 'custom_ratio', 'custom_resolution', 'video-options',
   'video_resolution', 'duration', 'count-label', 'image_count', 'timeout-label',
   'timeout', 'submit-btn', 'job-status-desc', 'loader', 'cancel-btn',
   'clear-history-btn', 'diagnostic-panel', 'error-message', 'diagnostic-details',
@@ -138,6 +200,20 @@ function getProtocolConfig() {
   return PROTOCOL_CONFIG[getSelectedProtocol()];
 }
 
+function getRequestModel() {
+  return getProtocolConfig().usesCustomModel ? els.custom_model.value.trim() : els.model.value;
+}
+
+function getCustomSize(ratio = els.custom_ratio.value, tier = els.custom_resolution.value) {
+  const sizes = CUSTOM_SIZE_MATRIX[ratio] || CUSTOM_SIZE_MATRIX[DEFAULT_SETTINGS.customRatio];
+  const tierIndex = CUSTOM_RESOLUTION_TIERS.indexOf(tier);
+  return sizes[tierIndex >= 0 ? tierIndex : 0];
+}
+
+function getRequestSize() {
+  return getProtocolConfig().usesCustomModel ? getCustomSize() : els.size.value;
+}
+
 function safePersistableBaseUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -175,6 +251,13 @@ function loadSettings() {
     const protocol = PROTOCOL_CONFIG[parsed.protocol] ? parsed.protocol : DEFAULT_SETTINGS.protocol;
     const config = PROTOCOL_CONFIG[protocol];
     const model = config.models.includes(parsed.model) ? parsed.model : config.defaultModel;
+    const customRatio = CUSTOM_SIZE_MATRIX[parsed.customRatio]
+      ? parsed.customRatio
+      : DEFAULT_SETTINGS.customRatio;
+    const storedCustomResolution = parsed.customResolution === '3K' ? '4K' : parsed.customResolution;
+    const customResolution = CUSTOM_RESOLUTION_TIERS.includes(storedCustomResolution)
+      ? storedCustomResolution
+      : DEFAULT_SETTINGS.customResolution;
     return {
       protocol,
       mode: parsed.mode === 'edit' ? 'edit' : 'generate',
@@ -189,6 +272,9 @@ function loadSettings() {
         ? parsed.videoResolution
         : DEFAULT_SETTINGS.videoResolution,
       duration: clampInt(parsed.duration, 1, 15, DEFAULT_SETTINGS.duration),
+      customModel: typeof parsed.customModel === 'string' ? parsed.customModel.slice(0, 200).trim() : '',
+      customRatio,
+      customResolution,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -202,6 +288,9 @@ function persistSettings() {
     baseUrl: safePersistableBaseUrl(els.base_url.value),
     model: els.model.value,
     size: els.size.value,
+    customModel: els.custom_model.value.trim(),
+    customRatio: els.custom_ratio.value,
+    customResolution: els.custom_resolution.value,
     count: clampInt(els.image_count.value, 1, getProtocolConfig().maxOutputs, 1),
     timeout: clampInt(els.timeout.value, 5, 600, 500),
     videoResolution: els.video_resolution.value,
@@ -296,7 +385,8 @@ function setSegmentedControl(container, attribute, activeValue) {
   for (const button of container.querySelectorAll(`[data-${attribute}]`)) {
     const active = button.dataset[attribute] === activeValue;
     button.setAttribute('aria-pressed', String(active));
-    button.className = active ? SEGMENT_ACTIVE : SEGMENT_IDLE;
+    const layoutClass = button.dataset.fullSpan === 'true' ? ' col-span-2' : '';
+    button.className = `${active ? SEGMENT_ACTIVE : SEGMENT_IDLE}${layoutClass}`;
   }
 }
 
@@ -321,11 +411,28 @@ function updateModelOptions(config, preferredModel) {
   els.model.value = config.models.includes(currentValue) ? currentValue : config.defaultModel;
 }
 
+function updateCustomResolutionOptions() {
+  const sizes = CUSTOM_SIZE_MATRIX[els.custom_ratio.value] || CUSTOM_SIZE_MATRIX[DEFAULT_SETTINGS.customRatio];
+  Array.from(els.custom_resolution.options).forEach((option, index) => {
+    option.textContent = `${option.value} · ${sizes[index]}`;
+  });
+}
+
 function applyProtocolPreset(preferredModel) {
   const config = getProtocolConfig();
-  updateModelOptions(config, preferredModel);
+  if (!config.usesCustomModel) updateModelOptions(config, preferredModel);
   updateProtocolButtons();
   updateModeButtons();
+
+  els['preset-image-options'].classList.toggle('hidden', Boolean(config.usesCustomModel));
+  els['custom-image-options'].classList.toggle('hidden', !config.usesCustomModel);
+  els.model.disabled = Boolean(config.usesCustomModel);
+  els.custom_model.disabled = !config.usesCustomModel;
+  els.custom_model.required = Boolean(config.usesCustomModel);
+  if (config.usesCustomModel) {
+    els.custom_model.placeholder = config.modelPlaceholder || '请输入模型名称';
+  }
+  updateCustomResolutionOptions();
 
   els['protocol-desc'].textContent = config.description;
   els['mode-label'].textContent = config.modeLabel;
@@ -724,12 +831,16 @@ async function createPayload() {
     api_key: els.api_key.value.trim(),
     protocol: config.backendProtocol,
     prompt: els.prompt.value.trim(),
-    model: els.model.value,
-    size: els.size.value,
+    model: getRequestModel(),
+    size: getRequestSize(),
     n: count,
     timeout,
   };
 
+  if (config.backendProtocol === 'gemini') {
+    payload.aspect_ratio = els.custom_ratio.value;
+    payload.resolution = els.custom_resolution.value;
+  }
   if (config.isVideo) {
     payload.video_resolution = els.video_resolution.value || '720p';
     payload.duration = clampInt(els.duration.value, 1, 15, 10);
@@ -745,6 +856,7 @@ function validatePayload(payload) {
   if (!payload.base_url) return '请先填写 Base URL';
   if (!payload.api_key) return '请先填写 API Key';
   if (!payload.prompt) return '请输入提示词';
+  if (!payload.model) return '请输入模型名称';
   if (payload.mode === 'edit' && payload.edit_images.length === 0) return '请先上传至少一张参考图';
   if (payload.mode === 'edit' && payload.edit_images.length > getProtocolConfig().maxReferenceImages) {
     return `当前协议最多上传 ${getProtocolConfig().maxReferenceImages} 张参考图`;
@@ -1014,6 +1126,9 @@ function hydrateSettings() {
   els.timeout.value = String(settings.timeout);
   els.video_resolution.value = settings.videoResolution;
   els.duration.value = String(settings.duration);
+  els.custom_model.value = settings.customModel;
+  els.custom_ratio.value = settings.customRatio;
+  els.custom_resolution.value = settings.customResolution;
   applyProtocolPreset(settings.model);
 }
 
@@ -1073,9 +1188,16 @@ function bindEvents() {
     void handleIncomingFiles(event.dataTransfer?.files);
   });
 
-  for (const id of ['base_url', 'model', 'size', 'image_count', 'timeout', 'video_resolution', 'duration']) {
+  for (const id of [
+    'base_url', 'model', 'size', 'custom_model', 'custom_resolution',
+    'image_count', 'timeout', 'video_resolution', 'duration',
+  ]) {
     els[id].addEventListener('change', persistSettings);
   }
+  els.custom_ratio.addEventListener('change', () => {
+    updateCustomResolutionOptions();
+    persistSettings();
+  });
   els['image_count'].addEventListener('blur', () => {
     els['image_count'].value = String(clampInt(els['image_count'].value, 1, getProtocolConfig().maxOutputs, 1));
   });

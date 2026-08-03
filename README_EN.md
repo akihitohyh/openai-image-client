@@ -2,7 +2,7 @@
 
 [中文说明](README.md)
 
-An image and video client for OpenAI Images API-compatible and xAI Grok Imagine-compatible services. It provides four entry points:
+An image and video client for OpenAI Images API-compatible services, the native Google Gemini image protocol, and xAI Grok Imagine-compatible services. It provides four entry points:
 
 - Python CLI
 - Local Web UI
@@ -14,23 +14,14 @@ It supports text-to-image, image editing, text-to-video, and image-to-video. MCP
 ## Feature Overview
 
 - OpenAI-compatible `images/generations` and `images/edits`
+- Native Gemini `models/{model}:generateContent` text-to-image and image editing in the Web UI
 - Grok Imagine image and asynchronous video jobs
-- Protocol-aware OpenAI/Grok Web controls
+- Protocol-aware OpenAI/Gemini/Grok Web controls
 - Web async jobs, status polling, cancellation, and in-page history
 - Cross-origin iframe embedding by default, with an optional parent-origin restriction
 - Base64 and remote URL media results
 - Private upstreams denied by default with an exact-host allowlist
 - MCP named profiles, controlled local image imports, remote tenant isolation, resource links, and a bounded job queue
-
-## What's New
-
-- Extracted `image_client_core/` so CLI, Web, and MCP share endpoint, model, and response parsing
-- Added cancellation for queued work and polling stages, bounded queues, HTTP/1.1 keep-alive, connection reuse, and immutable result caching
-- Fixed MCP result-asset and disk-quota leaks when jobs are cancelled, expired, or evicted
-- Reduced history re-renders and repeated media downloads; reference images are encoded only at submission time
-- Hardened Base64, response-size, SSRF, authentication, request-body, and error-response handling
-
-See [OPTIMIZATION.md](OPTIMIZATION.md) for the complete review, behavior changes, and verification notes.
 
 ## Project Structure
 
@@ -49,7 +40,6 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the complete review, behavior changes
 ├── config.json.example           # CLI example configuration
 ├── mcp-config.example.json       # MCP named-profile example
 ├── mcp-http-auth.example.json    # HTTP tenant-authentication example
-├── OPTIMIZATION.md               # Review, fixes, and verification notes
 ├── requirements.txt              # CLI/Web dependencies
 ├── requirements-mcp.txt          # MCP runtime dependencies
 ├── requirements-dev.txt          # Test and packaging dependencies
@@ -133,6 +123,37 @@ python web_app.py
 
 It listens only on `http://127.0.0.1:8000` by default. If the port is occupied, it tries subsequent ports; use `--strict-port` to disable that behavior.
 
+### Native Gemini Image Generation
+
+Select **Gemini Image** in the Web UI, then enter a Base URL, API key, and model name. The model is not fixed; it may be an official model or an identifier supplied by a compatible proxy.
+
+Accepted Base URL forms include:
+
+```text
+https://generativelanguage.googleapis.com/v1beta
+https://gemini-proxy.example/v1beta
+https://gemini-proxy.example/v1beta/models/custom-model:generateContent
+```
+
+A Base URL without an API version receives `/v1beta` automatically. Requests carry both `x-goog-api-key` and `Authorization: Bearer` to support the official Google endpoint and Gemini-compatible proxies that use bearer tokens. Cross-origin redirects remain blocked so credentials cannot be forwarded to another host.
+
+Text-to-image and image editing both use native `generateContent`. Prompts and references are placed in `contents[].parts`, references use `inlineData`, and generation settings use `responseModalities: ["TEXT", "IMAGE"]` plus `imageConfig.aspectRatio` and `imageConfig.imageSize`.
+
+Gemini shares these output choices with **Other Models**. The 4K tier does not exceed landscape `3840x2160` or portrait `2160x3840`:
+
+| Ratio | 1K | 2K | 4K |
+| --- | --- | --- | --- |
+| 1:1 | 1024x1024 | 2048x2048 | 2160x2160 |
+| 3:4 | 864x1152 | 1728x2304 | 2160x2880 |
+| 4:3 | 1152x864 | 2304x1728 | 2880x2160 |
+| 16:9 | 1312x736 | 2624x1472 | 3840x2160 |
+| 9:16 | 736x1312 | 1472x2624 | 2160x3840 |
+| 2:3 | 832x1248 | 1664x2496 | 2160x3240 |
+| 3:2 | 1248x832 | 2496x1664 | 3240x2160 |
+| 21:9 | 1568x672 | 3136x1344 | 3808x1632 |
+
+The UI displays the effective pixel reference while the native request sends the corresponding `1K`, `2K`, or `4K` tier. When output count `n` is greater than one, the service calls the upstream sequentially `n` times and takes the first valid image from each response. This produces `n` upstream requests and corresponding charges. Native Gemini support is limited to the Web UI and Web async-job API; CLI and MCP protocol support is unchanged.
+
 ### Web Workflow
 
 1. The frontend creates a job with `POST /api/generate-async`.
@@ -161,6 +182,7 @@ Initialization also removes the legacy `openai-image-client-web:v3` record, whic
 | Image count | 1-8 |
 | Video count | 1-4 |
 | OpenAI edit references | Up to 16 |
+| Gemini references | Up to 16, still subject to the 30 MiB combined limit |
 | Grok image references | Up to 3 |
 | Grok video references | Up to 7 |
 | Upstream timeout | 5-600 seconds |
@@ -465,6 +487,7 @@ HTTP-specific variables:
 | `OPENAI_IMAGE_MCP_HTTP_GLOBAL_IO_CONCURRENCY` | `8`, 1-64 | Blocking-I/O concurrency shared across all tenants |
 | `OPENAI_IMAGE_MCP_HTTP_TENANT_IO_CONCURRENCY` | `2`, 1-16 | Blocking-I/O concurrency for one tenant |
 | `OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS` | `128`, 1-1024 | Concurrent in-flight `/mcp` HTTP request limit |
+| `OPENAI_IMAGE_MCP_HTTP_TENANT_INFLIGHT_REQUESTS` | `min(16, global limit)`, 1-global limit | Per-tenant and unauthenticated in-flight `/mcp` request limit |
 | `OPENAI_IMAGE_MCP_HTTP_GLOBAL_ASSET_STORE_BYTES` | `max(10 GiB, max_asset_store_bytes)`, 1 MiB-1 TiB | Combined asset-disk quota for all HTTP tenants |
 | `OPENAI_IMAGE_MCP_HTTP_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 
@@ -481,11 +504,11 @@ Remote clients cannot submit server-local paths. HTTP mode does not register `im
 #### Capacity, Quotas, and Persistence
 
 - `OPENAI_IMAGE_MCP_HTTP_MAX_RESOURCE_BYTES` limits only a single remote `image-client://assets/{asset_id}` binary response. An oversized asset remains on disk and counts against quota, but its remote resource read fails.
-- Generation jobs use the shared worker/queue plus an automatic per-tenant in-flight job limit. A single-tenant configuration can use all `workers + queue` slots. In a multi-tenant configuration, each tenant can occupy at most `min(workers, max(1, workers + queue - 1))` running or queued slots, so one tenant cannot exhaust global capacity when more than one slot exists. A `1 worker / 0 queue` configuration has no slot to reserve; increase the queue if another tenant must submit while the first job runs. Blocking uploads, asset/resource reads, and status operations are also constrained by both global and per-tenant I/O limits. `OPENAI_IMAGE_MCP_HTTP_MAX_INFLIGHT_REQUESTS` separately caps the entire `/mcp` HTTP request layer.
+- Generation jobs use the shared worker/queue plus an automatic per-tenant in-flight job limit. A single-tenant configuration can use all `workers + queue` slots. In a multi-tenant configuration, each tenant can occupy at most `min(workers, max(1, workers + queue - 1))` running or queued slots, so one tenant cannot exhaust global capacity when more than one slot exists. A `1 worker / 0 queue` configuration has no slot to reserve; increase the queue if another tenant must submit while the first job runs. Blocking uploads, asset/resource reads, and status operations are also constrained by both global and per-tenant I/O limits. The HTTP request layer acquires a per-tenant slot before a global slot, so long-lived GET/SSE connections cannot monopolize all global capacity; unauthenticated and invalid-credential traffic shares a separately limited bucket.
 - Each tenant is constrained by `max_asset_store_bytes` (or `OPENAI_IMAGE_MCP_MAX_ASSET_STORE_BYTES`), while all tenants also share `OPENAI_IMAGE_MCP_HTTP_GLOBAL_ASSET_STORE_BYTES`. Exhausting either quota rejects new asset writes.
-- The job registry, job-TTL metadata, and both RPM windows are in memory. A restart loses job state and resets rate-limit windows. During normal operation, generated results are deleted and their quota is released when a job is cancelled, expires, or is evicted. Separately uploaded references and orphaned assets left by an unclean shutdown are not automatically removed; they persist across restarts and continue to consume both tenant and global quota.
+- The job registry, job-TTL metadata, and both RPM windows are in memory. A restart loses job state and resets rate-limit windows. Uploaded and generated asset files are not removed by job TTL and have no automatic asset TTL; they persist across restarts and continue to consume both tenant and global quota.
 
-Monitor the output directory and define an asset-retention policy. `MCPRuntime.prune_assets()` can reclaim orphaned assets left by an unclean shutdown using the job TTL, but it is not scheduled automatically; invoke it only during stopped maintenance or a controlled operations task. For manual cleanup, stop the service, remove unneeded asset data together with the matching metadata, and restart so existing bytes are rescanned and global and per-tenant quota counters are rebuilt. Do not remove files while the service is running because in-memory accounting will not be updated.
+Monitor the output directory and define an asset-retention policy. To clean up, stop the service, remove unneeded asset data together with the matching metadata, and restart. Startup and tenant-runtime initialization scan existing asset bytes and recalculate global and per-tenant quotas. Do not remove files while the service is running because in-memory accounting will not be updated.
 
 #### Single-Worker systemd Service
 
@@ -674,7 +697,7 @@ Restart Codex or start a new task after changing the token. `bearer_token_env_va
 - Fix each profile's `base_url` and set `allowed_models`
 - Give every remote MCP tenant a unique token and minimum scopes/profiles/both RPM limits, and keep its auth config at mode `0600`
 - Keep Web and HTTP MCP on loopback; use a trusted reverse proxy for remote TLS and edge authentication
-- Monitor per-tenant and global asset quotas; schedule controlled cleanup for uploaded and crash-orphaned assets
+- Monitor per-tenant and global asset quotas; assets have no automatic TTL, so use the stop, clean, and restart-recount procedure
 - Allow only the exact required private upstream hosts
 - Rotate any key previously exposed in source code or browser storage
 
