@@ -10,6 +10,7 @@ import pytest
 from requests import HTTPError, RequestException
 
 import web_app
+from image_client_core import responses
 
 
 class FakeResponse:
@@ -311,6 +312,12 @@ def test_gemini_response_parser_accepts_camel_and_snake_case_and_redacts_raw():
     assert first not in serialized
     assert second not in serialized
     assert serialized.count("<omitted>") == 2
+
+
+def test_uhd_inline_image_limits_cover_large_gemini_responses():
+    assert web_app.MAX_REMOTE_MEDIA_BYTES >= 64 * 1024 * 1024
+    assert web_app.MAX_GENERATED_MEDIA_BYTES >= 96 * 1024 * 1024
+    assert responses.MAX_UPSTREAM_JSON_BYTES >= 128 * 1024 * 1024
 
 
 def test_gemini_response_parser_rejects_missing_invalid_and_oversized_images(monkeypatch):

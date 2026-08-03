@@ -25,7 +25,9 @@ import requests
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
-MAX_UPSTREAM_JSON_BYTES = 32 * 1024 * 1024
+# Gemini image responses carry base64 inline data, so the JSON body is larger
+# than the decoded image (roughly 4/3 before JSON overhead).
+MAX_UPSTREAM_JSON_BYTES = 128 * 1024 * 1024
 # Diagnostics only ever need the head of an error body.
 DIAGNOSTIC_BODY_BYTES = 64 * 1024
 
