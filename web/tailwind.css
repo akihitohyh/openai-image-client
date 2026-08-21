@@ -181,3 +181,12 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 触屏没有 hover：只靠 group-hover 浮现的操作条和角标入口在手机上等于不存在。
+   放在 @layer 之外、文件末尾，输出时排在 utilities 之后，才能盖住 opacity-0。 */
+@media (hover: none) {
+  .media-actions,
+  .media-corner-action {
+    opacity: 1;
+  }
+}

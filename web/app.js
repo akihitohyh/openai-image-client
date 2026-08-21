@@ -657,15 +657,17 @@ function mediaExtension(source, type) {
 }
 
 function createMediaCard(source, type, index, entry) {
+  const isVideo = type === 'video';
+  const label = `${isVideo ? '视频' : '图像'} #${index + 1}`;
   const wrapper = document.createElement('div');
-  wrapper.className = type === 'video'
+  wrapper.className = isVideo
     ? 'group relative border border-white/10 rounded-xl overflow-hidden bg-ink-950 aspect-video transition hover:border-accent/40'
     : 'group relative border border-white/10 rounded-xl overflow-hidden checkerboard aspect-square transition hover:border-accent/40';
 
-  const media = document.createElement(type === 'video' ? 'video' : 'img');
+  const media = document.createElement(isVideo ? 'video' : 'img');
   media.src = source;
-  media.className = type === 'video' ? 'w-full h-full object-contain bg-ink-950' : 'w-full h-full object-cover';
-  if (type === 'video') {
+  media.className = isVideo ? 'w-full h-full object-contain bg-ink-950' : 'w-full h-full object-cover';
+  if (isVideo) {
     media.controls = true;
     // preload='metadata' 会让历史里每个视频都发一次 range 请求；改为按需加载。
     media.preload = 'none';
@@ -676,24 +678,47 @@ function createMediaCard(source, type, index, entry) {
     media.setAttribute('loading', 'lazy');
     media.setAttribute('decoding', 'async');
   }
+  wrapper.append(media);
 
+  const openPreview = () => openLightbox(type, source, label);
+
+  if (isVideo) {
+    // 视频不能整卡覆盖：透明层会吃掉原生播放键和进度条。入口放右上角，避开底部控件。
+    const expand = document.createElement('button');
+    expand.type = 'button';
+    expand.className = 'media-corner-action absolute right-2 top-2 z-20 rounded-lg border border-white/15 bg-ink-950/80 px-2 py-1 text-[11px] text-zinc-200 backdrop-blur-sm opacity-0 transition hover:bg-accent hover:text-ink-950 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/60 group-hover:opacity-100';
+    expand.textContent = '放大';
+    expand.setAttribute('aria-label', `放大预览${label}`);
+    expand.addEventListener('click', openPreview);
+    wrapper.append(expand);
+  } else {
+    // 整张图本身就是打开预览的按钮 —— 参考图卡片一直是这个模式，生成结果之前漏了，
+    // 唯一入口是下方那个仅在 hover 时浮现的小字按钮，触屏上几乎够不到。
+    const surface = document.createElement('button');
+    surface.type = 'button';
+    surface.className = 'absolute inset-0 z-10 cursor-zoom-in focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/60';
+    surface.setAttribute('aria-label', `放大预览${label}`);
+    surface.addEventListener('click', openPreview);
+    wrapper.append(surface);
+  }
+
+  // pointer-events-none 让底部这条渐变不再吃掉点击：图片卡片的点击要落到下面的
+  // 整卡按钮上，视频卡片的点击要落到原生控件上。只有下载链接重新打开事件。
   const actions = document.createElement('div');
-  actions.className = 'absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-ink-950/95 to-transparent pt-8 text-zinc-200 text-xs px-3 pb-2.5 flex items-center justify-between gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition';
+  actions.className = 'media-actions pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-ink-950/95 to-transparent pt-8 text-zinc-200 text-xs px-3 pb-2.5 flex items-center justify-between gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition';
 
-  const preview = document.createElement('button');
-  preview.type = 'button';
-  preview.className = 'truncate text-left hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/60 rounded transition';
-  preview.textContent = type === 'video' ? `预览视频 #${index + 1}` : `预览图像 #${index + 1}`;
-  preview.addEventListener('click', () => openLightbox(type, source, `${type === 'video' ? '视频' : '图像'} #${index + 1}`));
+  const caption = document.createElement('span');
+  caption.className = 'truncate text-left text-zinc-300';
+  caption.textContent = label;
 
   const download = document.createElement('a');
-  download.className = 'bg-white/10 hover:bg-accent hover:text-ink-950 text-zinc-100 text-xs px-2.5 py-1 rounded-md border border-white/15 font-medium transition shrink-0 backdrop-blur-sm';
+  download.className = 'pointer-events-auto bg-white/10 hover:bg-accent hover:text-ink-950 text-zinc-100 text-xs px-2.5 py-1 rounded-md border border-white/15 font-medium transition shrink-0 backdrop-blur-sm';
   download.href = source;
   download.download = `${type}_${entry.createdAt}_${index + 1}.${mediaExtension(source, type)}`;
   download.textContent = '下载';
 
-  actions.append(preview, download);
-  wrapper.append(media, actions);
+  actions.append(caption, download);
+  wrapper.append(actions);
   return wrapper;
 }
 

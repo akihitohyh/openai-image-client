@@ -133,3 +133,46 @@ test('custom model settings are persisted without changing existing model settin
     /getProtocolConfig\(\)\.usesCustomModel \? els\.custom_model\.value\.trim\(\) : els\.model\.value/,
   );
 });
+
+test('generated images open the lightbox when the image itself is clicked', () => {
+  const body = appJs.match(/function createMediaCard\(([\s\S]*?)\n\}/)?.[1] || '';
+  assert.ok(body, 'createMediaCard must exist');
+  // 只看 openPreview 之后的分支，并按 else 切开，分别验证两侧
+  const branch = body.split('const openPreview')[1] || '';
+  const [videoBranch, imageBranch] = branch.split('} else {');
+  assert.ok(videoBranch && imageBranch, 'preview entry must branch on media type');
+
+  // 图片分支：整卡透明按钮 + 放大光标，和参考图卡片同一个模式
+  assert.match(imageBranch, /surface\.className = '[^']*absolute inset-0[^']*cursor-zoom-in/);
+  assert.match(imageBranch, /surface\.addEventListener\('click', openPreview\)/);
+
+  // 视频分支：只能是角标入口。整卡覆盖会吃掉原生播放键和进度条。
+  assert.match(videoBranch, /expand\.className = '[^']*absolute right-2 top-2/);
+  assert.match(videoBranch, /expand\.addEventListener\('click', openPreview\)/);
+  assert.doesNotMatch(videoBranch, /absolute inset-0/);
+});
+
+test('the bottom action bar does not swallow clicks meant for the media', () => {
+  const body = appJs.match(/function createMediaCard\(([\s\S]*?)\n\}/)?.[1] || '';
+  // 渐变条覆盖在图片/视频控件之上，必须放行点击，只有下载链接重新接收事件
+  assert.match(body, /actions\.className = '[^']*pointer-events-none/);
+  assert.match(body, /download\.className = '[^']*pointer-events-auto/);
+});
+
+test('hover-only affordances stay reachable on touch devices', () => {
+  // 触屏没有 hover，group-hover 浮现的入口在手机上等于不存在
+  assert.match(stylesCss, /@media\s*\(hover:\s*none\)/);
+  assert.match(stylesCss, /\.media-actions[^{]*\{[^}]*opacity:\s*1/);
+  assert.match(stylesCss, /\.media-corner-action/);
+  // 覆盖规则必须排在 opacity-0 之后，否则同优先级下被盖掉
+  assert.ok(
+    stylesCss.indexOf('.media-actions') > stylesCss.lastIndexOf('.opacity-0{'),
+    'touch override must come after .opacity-0 in the compiled sheet',
+  );
+});
+
+test('compiled stylesheet carries the new preview utilities', () => {
+  for (const utility of ['cursor-zoom-in', 'pointer-events-none', 'pointer-events-auto']) {
+    assert.ok(stylesCss.includes(utility), `${utility} must be compiled into styles.css`);
+  }
+});
