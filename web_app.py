@@ -1066,8 +1066,95 @@ def extract_video_urls(data: dict) -> list[str]:
     return list(dict.fromkeys(videos))[:MAX_UPSTREAM_MEDIA_ITEMS]
 
 
-def validate_video_result_urls(videos: list[str]) -> list[str]:
-    return [validate_outbound_url(url, label="视频结果 URL") for url in dict.fromkeys(videos)]
+def resolve_media_result_url(value: str, base_endpoint: str, *, label: str) -> str:
+    """把上游返回的媒体地址规范成浏览器可以安全加载的 URL。
+
+    原来这里直接把每个值丢给 validate_outbound_url，等于假定上游只会返回绝对 http(s)
+    地址。凡是不满足这个假定的合法返回——内联的 data:video/* 载荷、协议相对的
+    //cdn/a.mp4、根相对的 /files/a.mp4——都会撞上"只允许 http 或 https"而整单失败。
+
+    所以先按产生该地址的端点补全相对形式，再分流：data: 只放行 video/* 且必须是有界
+    的 base64；其余仍然交给 validate_outbound_url，这样上游依旧无法借结果 URL 把浏览
+    器指向 loopback 或内网。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"{label} 不能为空")
+
+    if raw.startswith("data:"):
+        # 上游可能直接内联视频；_data_url_parts 会拒绝非 base64 的 data URL。
+        mime, encoded = _data_url_parts(raw)
+        if not mime.startswith("video/"):
+            raise ValueError(f"{label} 的 data URL 必须是 video/*，当前是 {mime}")
+        decode_base64_limited(encoded, MAX_REMOTE_MEDIA_BYTES, label)
+        return raw
+
+    if len(raw) > MAX_BASE_URL_CHARS:
+        raise ValueError(f"{label} 过长")
+    # 相对路径（/a.mp4、a.mp4）和协议相对地址（//cdn/a.mp4）按产生它的端点补全；
+    # 已经带 scheme 的绝对地址会被 urljoin 原样透传。
+    absolute = urljoin(base_endpoint, raw) if base_endpoint else raw
+    if urlparse(absolute).scheme.lower() not in {"http", "https"}:
+        raise ValueError(f"{label} 只允许 http、https 或 data:video/*，当前是 {absolute[:80]!r}")
+    # http(s) 分支仍然走出站校验：上游不能借由结果 URL 把浏览器指向 loopback 或内网，
+    # 而 OPENAI_IMAGE_CLIENT_TRUSTED_UPSTREAM_HOSTS 这个既有开关依然可以按需放行。
+    return validate_outbound_url(absolute, label=label)
+
+
+def resolve_video_result_urls(videos: list[str], base_endpoint: str = "") -> list[str]:
+    resolved: list[str] = []
+    total_bytes = 0
+    for url in dict.fromkeys(videos):
+        value = resolve_media_result_url(url, base_endpoint, label="视频结果 URL")
+        # 内联视频要计入总量；远程 URL 不占本机内存，data_url_payload_size 返回 0。
+        total_bytes += data_url_payload_size(value)
+        if total_bytes > MAX_GENERATED_MEDIA_BYTES:
+            raise ValueError(f"生成结果总大小超过 {MAX_GENERATED_MEDIA_BYTES} 字节限制")
+        resolved.append(value)
+    return resolved
+
+
+def is_gateway_relay_video_url(url: str, endpoint: str) -> bool:
+    """结果地址是否落在网关自己身上（因而需要带 API Key 才能取到内容）。
+
+    只认同源：凭据绝不能发给第三方 CDN。xAI 自己的 vidgen.x.ai 是签名地址，
+    浏览器可以直接取，不走这条路。
+    """
+    if url.startswith("data:") or not endpoint:
+        return False
+    return _url_origin(url) == _url_origin(endpoint)
+
+
+def download_relay_video_data_url(url: str, api_key: str, timeout: int) -> str:
+    """把网关代理的视频下载回来，转成 data URL 交给 materialize_job_result 落盘。
+
+    sub2api 会把 video.url 改写成自己的 /v1/videos/<id>/content，而那条路由挂着
+    apiKeyAuth。浏览器不会带 Authorization，直接塞进 <video src> 只会拿到 401，
+    所以必须由服务端带着 Key 取回来。sub2api 侧同样拒绝重定向，这里 safe_http_request
+    默认 allow_cross_origin=False，跨源跳转会被拒，凭据不会被转发出去。
+    """
+    response = safe_http_request(
+        "GET",
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=timeout,
+        stream=True,
+    )
+    try:
+        if not response.ok:
+            raise ValueError(
+                f"网关视频内容接口返回 HTTP {response.status_code}: "
+                f"{preview_response_body(response) or '无响应内容'}"
+            )
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type and not content_type.startswith("video/"):
+            raise ValueError(f"网关视频内容接口返回的不是视频: {content_type}")
+        body = read_limited_response(response, MAX_REMOTE_MEDIA_BYTES)
+    finally:
+        response.close()
+    if not body:
+        raise ValueError("网关视频内容接口返回了空响应")
+    return data_url_from_bytes(body, content_type or "video/mp4")
 
 
 def request_grok_video_api(
@@ -1275,7 +1362,42 @@ def request_grok_video_api(
             )
         )
 
-    videos = validate_video_result_urls(videos)
+    try:
+        videos = resolve_video_result_urls(videos, last_endpoint)
+        # 网关代理地址要在这里换成内容本身；留给浏览器只会 401。
+        videos = [
+            download_relay_video_data_url(url, api_key, timeout)
+            if is_gateway_relay_video_url(url, last_endpoint)
+            else url
+            for url in videos
+        ]
+    except RequestException as exc:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "message": f"下载网关视频内容失败: {type(exc).__name__}: {exc}",
+                    "last_endpoint": last_endpoint,
+                    "client_request_id": client_request_id,
+                    "raw": raw_results[-1] if len(raw_results) == 1 else raw_results,
+                },
+                ensure_ascii=False,
+            )
+        ) from exc
+    except ValueError as exc:
+        # 上游返回了无法交给浏览器的地址。以前这里抛裸 ValueError，前端只看到一句
+        # "只允许 http 或 https"，原始响应被整个丢掉，没人能查出上游到底给了什么。
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "message": str(exc),
+                    "last_endpoint": last_endpoint,
+                    "client_request_id": client_request_id,
+                    "raw": raw_results[-1] if len(raw_results) == 1 else raw_results,
+                },
+                ensure_ascii=False,
+            )
+        ) from exc
+
     duration_ms = int((time.time() - started_at) * 1000)
     return {
         "ok": True,
@@ -1821,6 +1943,34 @@ def validate_request_payload(payload: dict) -> None:
         bounded_payload_int(payload, "partial_images", DEFAULT_STREAM_PARTIAL_IMAGES, 1, MAX_PARTIAL_IMAGES)
 
 
+def parse_byte_range(header: str, total_size: int) -> tuple[int, int] | None:
+    """解析单段 bytes Range，返回闭区间 (start, end)。
+
+    没有 Range、或形式无法处理时返回 None，调用方按整体响应——RFC 7233 允许忽略
+    不认识的 Range。语法合法但超出资源范围时抛 ValueError，调用方回 416。
+    只支持单段：多段要 multipart/byteranges，浏览器播放视频不会用到。
+    """
+    value = str(header or "").strip().lower()
+    if not value.startswith("bytes=") or "," in value:
+        return None
+    start_text, separator, end_text = value[6:].strip().partition("-")
+    if not separator:
+        return None
+    try:
+        if not start_text:
+            # bytes=-N：末尾 N 字节。N<=0 不可满足，落到下面统一判断。
+            suffix = int(end_text)
+            start, end = (max(0, total_size - suffix), total_size - 1) if suffix > 0 else (total_size, total_size)
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else total_size - 1
+    except ValueError:
+        return None
+    if start < 0 or start >= total_size or start > end:
+        raise ValueError("range 不可满足")
+    return start, min(end, total_size - 1)
+
+
 def _asset_directory(job_id: str) -> Path:
     return ASSET_ROOT / job_id
 
@@ -1839,35 +1989,55 @@ def _data_url_parts(value: str) -> tuple[str, str] | None:
     return mime, encoded
 
 
+MEDIA_SUFFIX_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+}
+DEFAULT_MEDIA_SUFFIX = {"image": ".png", "video": ".mp4"}
+MEDIA_KIND_LABEL = {"image": "图片", "video": "视频"}
+
+
 def materialize_job_result(job_id: str, result: dict) -> dict:
     stored = dict(result)
-    images = list(result.get("images") or [])
-    materialized_images: list[str] = []
     asset_dir: Path | None = None
 
-    for index, image in enumerate(images, start=1):
-        value = str(image)
-        parts = _data_url_parts(value)
-        if not parts:
-            materialized_images.append(value)
-            continue
-        mime, encoded = parts
-        if not mime.startswith("image/"):
-            raise ValueError("生成结果 data URL 不是图片")
-        image_bytes = decode_base64_limited(encoded, MAX_REMOTE_MEDIA_BYTES, "生成结果")
-        if asset_dir is None:
-            asset_dir = _asset_directory(job_id)
-            asset_dir.mkdir(parents=True, exist_ok=True)
-        suffix = {"image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}.get(mime, ".png")
-        filename = f"image-{index}{suffix}"
-        (asset_dir / filename).write_bytes(image_bytes)
-        materialized_images.append(f"/api/assets/{job_id}/{filename}")
+    def materialize(values: list[str], kind: str) -> list[str]:
+        nonlocal asset_dir
+        materialized: list[str] = []
+        for index, value in enumerate(values, start=1):
+            text = str(value)
+            parts = _data_url_parts(text)
+            if not parts:
+                materialized.append(text)
+                continue
+            mime, encoded = parts
+            if not mime.startswith(f"{kind}/"):
+                raise ValueError(f"生成结果 data URL 不是{MEDIA_KIND_LABEL[kind]}")
+            media_bytes = decode_base64_limited(encoded, MAX_REMOTE_MEDIA_BYTES, "生成结果")
+            if asset_dir is None:
+                asset_dir = _asset_directory(job_id)
+                asset_dir.mkdir(parents=True, exist_ok=True)
+            suffix = MEDIA_SUFFIX_BY_MIME.get(mime, DEFAULT_MEDIA_SUFFIX[kind])
+            filename = f"{kind}-{index}{suffix}"
+            (asset_dir / filename).write_bytes(media_bytes)
+            materialized.append(f"/api/assets/{job_id}/{filename}")
+        return materialized
+
+    materialized_images = materialize([str(item) for item in result.get("images") or []], "image")
+    # 内联视频同样要落盘：几 MB 的 base64 否则会常驻 JOBS，并在前端每 1.5 秒一次的
+    # 轮询里被重新序列化一遍。远程 URL 仍然原样透传。
+    materialized_videos = materialize([str(item) for item in result.get("videos") or []], "video")
 
     stored["images"] = materialized_images
-    videos = [str(value) for value in result.get("videos") or []]
+    stored["videos"] = materialized_videos
     stored["media"] = [
         *({"type": "image", "url": value} for value in materialized_images),
-        *({"type": "video", "url": value} for value in videos),
+        *({"type": "video", "url": value} for value in materialized_videos),
     ]
     return stored
 
@@ -2341,19 +2511,46 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        total_size = stat_result.st_size
+        # 视频资产必须支持 Range：Safari 的 <video> 会先发 Range: bytes=0-1，
+        # 只回 200 时它可能直接拒绝播放；Chrome 能播但拖不动进度条。
+        try:
+            byte_range = parse_byte_range(self.headers.get("Range", ""), total_size)
+        except ValueError:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{total_size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         try:
             handle = path.open("rb")
         except OSError:
             self._send_json(404, {"ok": False, "message": "资源不存在或已过期"})
             return
         with handle:
-            self.send_response(200)
+            if byte_range is None:
+                start, length, status = 0, total_size, 200
+            else:
+                start, end = byte_range
+                length, status = end - start + 1, 206
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(stat_result.st_size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
             self.send_header("ETag", etag)
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{start + length - 1}/{total_size}")
             self.end_headers()
-            # 流式拷贝，避免把整张图再复制一份到内存。
-            shutil.copyfileobj(handle, self.wfile, 64 * 1024)
+            # 分块写出，避免把整个文件再复制一份到内存。
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def do_GET(self) -> None:
         request_path = urlparse(self.path).path

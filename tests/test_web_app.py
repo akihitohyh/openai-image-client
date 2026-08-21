@@ -446,13 +446,18 @@ def test_video_done_without_url_fails_even_after_another_video_succeeded(monkeyp
 @pytest.mark.parametrize("url", ["file:///etc/passwd", "http://127.0.0.1/private.mp4"])
 def test_video_result_url_cannot_target_local_resources(monkeypatch, url):
     monkeypatch.setattr(web_app, "safe_http_request", lambda *args, **kwargs: FakeResponse({"url": url}))
-    with pytest.raises(ValueError):
+    # 拒绝行为不变；异常类型从裸 ValueError 改为带诊断的 RuntimeError，
+    # 这样报错里会带上上游原始响应，而不是只剩一句 scheme 不合法。
+    with pytest.raises(RuntimeError) as excinfo:
         web_app.request_grok_video_api(
             "https://8.8.8.8/v1",
             "key",
             30,
             json_body={"model": "grok-imagine-video", "prompt": "test"},
         )
+    payload = json.loads(str(excinfo.value))
+    assert "视频结果 URL" in payload["message"]
+    assert payload["raw"] == {"url": url}
 
 
 def test_image_remote_fallback_rejects_non_http_url():
@@ -643,3 +648,216 @@ def test_http_layer_rejects_oversized_body_before_reading():
 def test_non_loopback_listener_requires_auth_token():
     with pytest.raises(ValueError, match="OPENAI_IMAGE_CLIENT_AUTH_TOKEN"):
         web_app.create_server("0.0.0.0", 0, True)
+
+
+GROK_VIDEO_ENDPOINT = "https://api.x.ai/v1/videos/generations"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # 绝对地址原样保留
+        ("https://cdn.x.ai/a.mp4", "https://cdn.x.ai/a.mp4"),
+        # 协议相对地址按端点补全 scheme
+        ("//cdn.x.ai/a.mp4", "https://cdn.x.ai/a.mp4"),
+        # 根相对路径按端点补全 scheme + host
+        ("/files/a.mp4", "https://api.x.ai/files/a.mp4"),
+        # 路径相对地址
+        ("a.mp4", "https://api.x.ai/v1/videos/a.mp4"),
+    ],
+)
+def test_video_result_urls_resolve_relative_forms(raw, expected):
+    assert web_app.resolve_video_result_urls([raw], GROK_VIDEO_ENDPOINT) == [expected]
+
+
+def test_video_result_accepts_inline_data_url():
+    data_url = "data:video/mp4;base64," + base64.b64encode(b"fake-mp4").decode()
+    assert web_app.resolve_video_result_urls([data_url], GROK_VIDEO_ENDPOINT) == [data_url]
+
+
+def test_video_result_url_still_blocks_local_targets():
+    # 补全相对地址不能成为绕过口子：拼出来的绝对地址仍要过出站校验。
+    with pytest.raises(ValueError):
+        web_app.resolve_video_result_urls(["/a.mp4"], "https://127.0.0.1/v1/videos/generations")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "javascript:alert(1)",
+        "blob:https://api.x.ai/abc",
+        "data:text/html;base64,PHNjcmlwdD4=",
+        "data:video/mp4,not-base64",
+        "",
+    ],
+)
+def test_video_result_urls_reject_unloadable_schemes(raw):
+    with pytest.raises(ValueError):
+        web_app.resolve_video_result_urls([raw], GROK_VIDEO_ENDPOINT)
+
+
+def test_video_result_total_size_is_bounded(monkeypatch):
+    monkeypatch.setattr(web_app, "MAX_GENERATED_MEDIA_BYTES", 4)
+    oversized = "data:video/mp4;base64," + base64.b64encode(b"aaaaaaaa").decode()
+    with pytest.raises(ValueError, match="总大小"):
+        web_app.resolve_video_result_urls([oversized], GROK_VIDEO_ENDPOINT)
+
+
+def test_inline_video_is_materialized_to_an_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "ASSET_ROOT", tmp_path)
+    video_bytes = b"fake-mp4-body"
+    data_url = "data:video/mp4;base64," + base64.b64encode(video_bytes).decode()
+    stored = web_app.materialize_job_result("job-id", {"images": [], "videos": [data_url]})
+    assert stored["videos"] == ["/api/assets/job-id/video-1.mp4"]
+    assert stored["media"] == [{"type": "video", "url": "/api/assets/job-id/video-1.mp4"}]
+    assert (tmp_path / "job-id" / "video-1.mp4").read_bytes() == video_bytes
+
+
+def test_remote_video_urls_are_not_materialized(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "ASSET_ROOT", tmp_path)
+    stored = web_app.materialize_job_result(
+        "job-id", {"images": [], "videos": ["https://cdn.x.ai/a.mp4"]}
+    )
+    assert stored["videos"] == ["https://cdn.x.ai/a.mp4"]
+    assert not (tmp_path / "job-id").exists()
+
+def test_sub2api_relay_video_is_downloaded_with_the_api_key(monkeypatch):
+    """sub2api 把 video.url 改写成 /v1/videos/<id>/content，该路由挂了 apiKeyAuth。"""
+    seen = {}
+
+    def fake_request(method, url, **kwargs):
+        if method == "POST":
+            return FakeResponse({"status": "done", "video": {"url": "/v1/videos/req-1/content"}})
+        seen["url"] = url
+        seen["auth"] = kwargs.get("headers", {}).get("Authorization")
+        return FakeResponse(body=b"mp4-bytes", headers={"Content-Type": "video/mp4"})
+
+    monkeypatch.setattr(web_app, "safe_http_request", fake_request)
+    result = web_app.request_grok_video_api(
+        "https://8.8.8.8/v1",
+        "secret-key",
+        30,
+        json_body={"model": "grok-imagine-video", "prompt": "p"},
+    )
+    # 相对地址按端点补全成网关的绝对地址
+    assert seen["url"] == "https://8.8.8.8/v1/videos/req-1/content"
+    # 且带上了 Key，否则网关返回 401
+    assert seen["auth"] == "Bearer secret-key"
+    # 内容被取回并内联，交给 materialize_job_result 落盘
+    assert result["videos"][0] == "data:video/mp4;base64," + base64.b64encode(b"mp4-bytes").decode()
+
+
+def test_third_party_cdn_video_never_receives_the_api_key(monkeypatch):
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs.get("headers", {}).get("Authorization")))
+        return FakeResponse({"status": "done", "video": {"url": "https://1.1.1.1/signed/a.mp4"}})
+
+    monkeypatch.setattr(web_app, "safe_http_request", fake_request)
+    result = web_app.request_grok_video_api(
+        "https://8.8.8.8/v1",
+        "secret-key",
+        30,
+        json_body={"model": "grok-imagine-video", "prompt": "p"},
+    )
+    # 异源签名地址原样交给浏览器，服务端不下载、更不带 Key
+    assert result["videos"] == ["https://1.1.1.1/signed/a.mp4"]
+    assert [call for call in calls if call[1].startswith("https://1.1.1.1")] == []
+
+
+def test_relay_video_download_failure_reports_diagnostics(monkeypatch):
+    def fake_request(method, url, **kwargs):
+        if method == "POST":
+            return FakeResponse({"status": "done", "video": {"url": "/v1/videos/req-1/content"}})
+        return FakeResponse({"error": "unauthorized"}, status=401)
+
+    monkeypatch.setattr(web_app, "safe_http_request", fake_request)
+    with pytest.raises(RuntimeError) as excinfo:
+        web_app.request_grok_video_api(
+            "https://8.8.8.8/v1",
+            "secret-key",
+            30,
+            json_body={"model": "grok-imagine-video", "prompt": "p"},
+        )
+    payload = json.loads(str(excinfo.value))
+    assert "HTTP 401" in payload["message"]
+    assert payload["raw"]["video"]["url"] == "/v1/videos/req-1/content"
+
+
+@pytest.mark.parametrize(
+    "header, expected",
+    [
+        ("", None),                       # 无 Range -> 整体响应
+        ("bytes=0-1", (0, 1)),            # Safari 的探测请求
+        ("bytes=0-", (0, 99)),
+        ("bytes=50-", (50, 99)),
+        ("bytes=10-20", (10, 20)),
+        ("bytes=90-500", (90, 99)),       # 末端截断到资源大小
+        ("bytes=-10", (90, 99)),          # 末尾 N 字节
+        ("bytes=0-1,5-6", None),          # 多段不处理，按整体响应
+        ("items=0-1", None),              # 非 bytes 单位
+        ("bytes=abc", None),              # 语法错误
+    ],
+)
+def test_parse_byte_range(header, expected):
+    assert web_app.parse_byte_range(header, 100) == expected
+
+
+@pytest.mark.parametrize("header", ["bytes=100-", "bytes=200-300", "bytes=-0"])
+def test_parse_byte_range_rejects_unsatisfiable(header):
+    with pytest.raises(ValueError):
+        web_app.parse_byte_range(header, 100)
+
+
+def _serve_asset(tmp_path, monkeypatch, body, *, headers):
+    monkeypatch.setattr(web_app, "ASSET_ROOT", tmp_path)
+    job_id = "11111111-1111-1111-1111-111111111111"
+    (tmp_path / job_id).mkdir(parents=True, exist_ok=True)
+    (tmp_path / job_id / "video-1.mp4").write_bytes(body)
+    monkeypatch.setattr(web_app, "get_async_job", lambda _id: {"status": "success"})
+
+    handler = object.__new__(web_app.AppHandler)
+    handler.path = f"/api/assets/{job_id}/video-1.mp4"
+    handler.request_version = "HTTP/1.1"
+    handler.server = SimpleNamespace(frame_ancestors="*", x_frame_options=None)
+    handler.headers = headers
+    handler._headers_buffer = []
+    handler.wfile = BytesIO()
+    handler.send_response = MethodType(
+        lambda self, code, message=None: self._headers_buffer.append(f"STATUS {code}"), handler
+    )
+    handler.send_header = MethodType(
+        lambda self, key, value: self._headers_buffer.append(f"{key}: {value}"), handler
+    )
+    handler.end_headers = MethodType(lambda self: None, handler)
+    handler._send_asset(job_id, "video-1.mp4")
+    return handler._headers_buffer, handler.wfile.getvalue()
+
+
+def test_video_asset_serves_range_requests(tmp_path, monkeypatch):
+    body = bytes(range(100))
+    sent, payload = _serve_asset(tmp_path, monkeypatch, body, headers={"Range": "bytes=10-19"})
+    assert "STATUS 206" in sent
+    assert "Content-Range: bytes 10-19/100" in sent
+    assert "Accept-Ranges: bytes" in sent
+    assert "Content-Length: 10" in sent
+    assert payload == body[10:20]
+
+
+def test_video_asset_without_range_still_returns_whole_body(tmp_path, monkeypatch):
+    body = bytes(range(100))
+    sent, payload = _serve_asset(tmp_path, monkeypatch, body, headers={})
+    assert "STATUS 200" in sent
+    # 即使整体响应也要声明支持 Range，否则 Safari 不会再发探测请求
+    assert "Accept-Ranges: bytes" in sent
+    assert payload == body
+
+
+def test_video_asset_rejects_unsatisfiable_range(tmp_path, monkeypatch):
+    sent, payload = _serve_asset(
+        tmp_path, monkeypatch, bytes(range(100)), headers={"Range": "bytes=500-600"}
+    )
+    assert "STATUS 416" in sent
+    assert "Content-Range: bytes */100" in sent
+    assert payload == b""
