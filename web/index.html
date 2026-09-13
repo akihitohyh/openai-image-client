@@ -34,7 +34,7 @@
         <section class="w-full md:w-[400px] shrink-0 panel flex flex-col overflow-y-visible md:overflow-y-auto no-scrollbar" aria-labelledby="config-title">
             <div class="px-5 pt-5 pb-4 border-b border-white/[0.07]">
                 <h2 id="config-title" class="text-sm font-semibold text-zinc-100">接口与参数配置</h2>
-                <p id="protocol-desc" class="text-xs text-zinc-500 mt-1 leading-relaxed">OpenAI 生图使用 Images API，适合 gpt-image-2。</p>
+                <p id="protocol-desc" class="text-xs text-zinc-500 mt-1 leading-relaxed">OpenAI 生图使用 Images API，适合 gpt-image-2 与 gpt-image-2.5 系列。</p>
             </div>
 
             <form id="config-form" class="px-5 py-5 space-y-5 flex-1">
@@ -103,6 +103,8 @@
                         <label for="model" class="field-label">模型 (Model)</label>
                         <select id="model" class="field">
                             <option value="gpt-image-2">gpt-image-2</option>
+                            <option value="gpt-image-2.5-flare">gpt-image-2.5-flare</option>
+                            <option value="gpt-image-2.5-sunburst">gpt-image-2.5-sunburst</option>
                         </select>
                     </div>
                     <div>
@@ -113,6 +115,8 @@
                             <option value="1536x1024">1536x1024</option>
                             <option value="1920x1072">1920x1072</option>
                             <option value="1072x1920">1072x1920</option>
+                            <option value="3840x2160">3840x2160 (4K)</option>
+                            <option value="2160x3840">2160x3840 (4K)</option>
                         </select>
                     </div>
                 </div>

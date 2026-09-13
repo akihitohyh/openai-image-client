@@ -27,8 +27,8 @@ const PROTOCOL_CONFIG = {
   'openai-image': {
     backendProtocol: 'openai',
     defaultModel: 'gpt-image-2',
-    models: ['gpt-image-2'],
-    description: 'OpenAI 生图使用 Images API，适合 gpt-image-2。',
+    models: ['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'],
+    description: 'OpenAI 生图使用 Images API，适合 gpt-image-2 与 gpt-image-2.5 系列。',
     promptPlaceholder: '例如: A professional minimalist workspace, cinematic lighting...',
     promptLabel: '提示词 (Prompt)',
     generateLabel: '文生图 (Generate)',

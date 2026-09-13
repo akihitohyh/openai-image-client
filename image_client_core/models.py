@@ -58,7 +58,11 @@ GROK_VIDEO_SUPPORTED_RATIOS = {
 
 def is_gpt_image_2(model: str) -> bool:
     value = str(model or "").strip().lower()
-    return value == "gpt-image-2" or value.startswith("gpt-image-2-")
+    if value == "gpt-image-2" or value.startswith("gpt-image-2-"):
+        return True
+    # gpt-image-2.5 系列（如 gpt-image-2.5-flare / gpt-image-2.5-sunburst）走同一
+    # Images API 代码路径：edit 用 image[] 数组字段、拒绝 background=transparent。
+    return value.startswith("gpt-image-2.5")
 
 
 def is_grok_image_model(model: str) -> bool:
