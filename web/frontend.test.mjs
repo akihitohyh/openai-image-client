@@ -79,6 +79,17 @@ test('custom OpenAI-compatible model UI is available', () => {
   assert.match(appJs, /if \(!payload\.model\) return '请输入模型名称'/);
 });
 
+test('OpenAI image protocol offers gpt-image-2.5 variants and 4K sizes', () => {
+  // 模型下拉包含 gpt-image-2.5 系列（app.js 的 PROTOCOL_CONFIG 是渲染数据源）。
+  assert.match(appJs, /'openai-image': \{[\s\S]*?models: \['gpt-image-2', 'gpt-image-2\.5-flare', 'gpt-image-2\.5-sunburst'\]/);
+  // index.html 静态 option 是无 JS 回退，须与 PROTOCOL_CONFIG 保持一致。
+  assert.match(indexHtml, /<option value="gpt-image-2\.5-flare">/);
+  assert.match(indexHtml, /<option value="gpt-image-2\.5-sunburst">/);
+  // 4K 档沿用 CUSTOM_SIZE_MATRIX 的 4K 语义（16:9/9:16 → 3840x2160/2160x3840）。
+  assert.match(indexHtml, /<option value="3840x2160">/);
+  assert.match(indexHtml, /<option value="2160x3840">/);
+});
+
 test('Gemini native image protocol reuses manual model and UHD controls', () => {
   assert.match(indexHtml, /data-protocol="gemini-image"[^>]*>Gemini 生图</);
   assert.match(appJs, /'gemini-image': \{[\s\S]*?backendProtocol: 'gemini'/);

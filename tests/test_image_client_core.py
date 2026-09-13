@@ -82,6 +82,9 @@ def test_model_detection_ignores_case_and_padding() -> None:
     # generate_image.py compared verbatim, so "GPT-Image-2" took the wrong branch.
     for value in ("gpt-image-2", "GPT-Image-2", "  gpt-image-2  ", "gpt-image-2-mini"):
         assert models.is_gpt_image_2(value) is True
+    # gpt-image-2.5 系列（flare/sunburst）沿用 gpt-image-2 的 Images API 路径。
+    for value in ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "GPT-Image-2.5-Flare"):
+        assert models.is_gpt_image_2(value) is True
     for value in ("dall-e-3", "", None, "gpt-image-3"):
         assert models.is_gpt_image_2(value) is False
 
