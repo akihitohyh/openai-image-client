@@ -57,7 +57,7 @@ test('compiled stylesheet exists and Tailwind CDN is absent', () => {
 });
 
 test('frontend limits match backend request constraints', () => {
-  assert.match(appJs, /MAX_REFERENCE_IMAGE_BYTES = 10 \* 1024 \* 1024/);
+  assert.match(appJs, /MAX_REFERENCE_IMAGE_BYTES = 20 \* 1024 \* 1024/);
   assert.match(appJs, /MAX_REFERENCE_IMAGES_TOTAL_BYTES = 30 \* 1024 \* 1024/);
   assert.match(appJs, /'grok-video':[\s\S]*?maxOutputs: 4/);
   assert.match(appJs, /timeout: clampInt\(parsed\.timeout, 5, 600,/);
@@ -237,4 +237,45 @@ test('markup exposes the four independently toggled option blocks', () => {
     assert.match(indexHtml, new RegExp(`id="${id}"`), `#${id} must exist in the markup`);
     assert.match(appJs, new RegExp(`'${id}'`), `#${id} must be wired in app.js`);
   }
+});
+
+test('generated images can be reused as edit references', () => {
+  const body = appJs.match(/async function reuseGeneratedImage\(([\s\S]*?)\n\}/)?.[1] || '';
+  assert.ok(body, 'reuseGeneratedImage must exist');
+  // 必须复用手动上传的入口，否则类型/大小/张数四层校验会被绕过
+  assert.match(body, /await addReferenceFiles\(\[file\]\)/);
+  // 任务运行中不能加参考图：switchMode 此时是 no-op
+  assert.match(body, /if \(activeTask\)/);
+  // 资产 1 小时过期，404 要给出可操作的说明而不是裸 HTTP 码
+  assert.match(body, /response\.status === 404/);
+  assert.match(body, /已过期/);
+  // 成功后切到图生图，否则参考图加了却看不见
+  assert.match(body, /switchMode\('edit'\)/);
+  // 校验没通过时不能谎报成功
+  assert.match(body, /uploadedReferenceImages\.length === before/);
+});
+
+test('the reuse button is image-only and re-enables pointer events', () => {
+  const body = appJs.match(/function createMediaCard\(([\s\S]*?)\n\}/)?.[1] || '';
+  // `if (!isVideo) {` 之后的那一段就是图片专属分支
+  const imageOnlyBlock = (body.split('if (!isVideo) {')[1] || '').split('\n  }')[0];
+  assert.ok(imageOnlyBlock, 'the reuse button must sit behind an !isVideo guard');
+  assert.match(imageOnlyBlock, /reuse\.addEventListener\('click'/);
+  // 底部渐变条是 pointer-events-none 的，按钮必须自己开回来才能点
+  assert.match(imageOnlyBlock, /reuse\.className = '[^']*pointer-events-auto/);
+  // 视频卡片不能出现复用按钮
+  const videoOnlyBlock = (body.split('if (isVideo) {')[1] || '').split('\n  } else {')[0];
+  assert.doesNotMatch(videoOnlyBlock, /reuse/);
+  // 标题在 flex 里要 min-w-0 才会截断，否则会把按钮挤出卡片
+  assert.match(body, /caption\.className = '[^']*min-w-0[^']*truncate/);
+});
+
+test('reference size limits stay within the backend request body cap', () => {
+  const single = Number(appJs.match(/MAX_REFERENCE_IMAGE_BYTES = (\d+) \* 1024 \* 1024/)?.[1]);
+  const total = Number(appJs.match(/MAX_REFERENCE_IMAGES_TOTAL_BYTES = (\d+) \* 1024 \* 1024/)?.[1]);
+  assert.ok(single <= total, 'a single reference must fit within the total budget');
+  // 后端 MAX_REQUEST_BODY_BYTES 是 48MB，base64 会把原始字节放大 4/3
+  assert.ok((total * 4) / 3 < 48, `total ${total}MB becomes ${(total * 4) / 3}MB after base64, over the 48MB body cap`);
+  // 警告文案必须从常量推导，不能再写死数字
+  assert.match(appJs, /单张不能超过 \$\{formatBytes\(MAX_REFERENCE_IMAGE_BYTES\)\}/);
 });

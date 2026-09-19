@@ -95,7 +95,9 @@ MAX_MODEL_CHARS = 200
 MAX_BASE_URL_CHARS = 2_048
 MAX_API_KEY_CHARS = 8_192
 MAX_REQUEST_BODY_BYTES = 48 * 1024 * 1024
-MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
+# 单张 20MB：一张 4K 生成图（实测 PNG 可达 ~17MB）要能直接当参考图复用。
+# 总量保持 30MB —— base64 后约 40MB，再大就会顶穿上面的 48MB 请求体上限。
+MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_IMAGES_BYTES = 30 * 1024 * 1024
 # 4K Gemini/OpenAI images can exceed 20 MiB after base64 decoding. Keep a
 # bounded per-image ceiling that still allows high-detail UHD PNGs.

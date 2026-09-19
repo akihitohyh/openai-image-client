@@ -7,7 +7,10 @@ const HISTORY_LIMIT = 12;
 const OPENAI_MAX_REFERENCE_IMAGES = 16;
 const GROK_MAX_REFERENCE_IMAGES = 3;
 const GROK_MAX_VIDEO_REFERENCE_IMAGES = 7;
-const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+// 与 web_app.py 的 MAX_REFERENCE_IMAGE_BYTES / MAX_REFERENCE_IMAGES_BYTES 一一对应。
+// 单张 20MB 是为了让一张 4K 生成图能直接复用；总量受后端 48MB 请求体上限约束，
+// base64 会把 30MB 放大到约 40MB，所以不能再往上抬。
+const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_REFERENCE_IMAGES_TOTAL_BYTES = 30 * 1024 * 1024;
 const ALLOWED_REFERENCE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
@@ -507,9 +510,12 @@ async function addReferenceFiles(files) {
     if (!ALLOWED_REFERENCE_IMAGE_TYPES.has(file.type)) {
       warnings.push(`${file.name || '未命名文件'}：仅支持 PNG / JPG / WEBP`);
     } else if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
-      warnings.push(`${file.name || '未命名文件'}：单张不能超过 10 MB`);
+      // 文案从常量推导，否则改上限时这两行会被漏掉而变成谎报
+      warnings.push(`${file.name || '未命名文件'}：单张不能超过 ${formatBytes(MAX_REFERENCE_IMAGE_BYTES)}`);
     } else if (totalBytes + file.size > MAX_REFERENCE_IMAGES_TOTAL_BYTES) {
-      warnings.push(`${file.name || '未命名文件'}：全部参考图合计不能超过 30 MB`);
+      warnings.push(
+        `${file.name || '未命名文件'}：全部参考图合计不能超过 ${formatBytes(MAX_REFERENCE_IMAGES_TOTAL_BYTES)}`,
+      );
     } else {
       accepted.push(file);
       totalBytes += file.size;
@@ -536,6 +542,56 @@ async function addReferenceFiles(files) {
   }
   renderReferenceImages();
   if (warnings.length) showError('部分参考图未添加', warnings.join('\n'));
+}
+
+async function reuseGeneratedImage(source, label) {
+  // 任务运行中 switchMode 本来就是 no-op，先拦一道免得参考图进了列表却切不到图生图。
+  if (activeTask) {
+    setStatus('任务进行中，暂时无法添加参考图。');
+    return;
+  }
+  hideError();
+  setStatus(`正在取回${label}…`);
+
+  let file;
+  try {
+    const response = await fetch(source, { cache: 'no-store' });
+    if (!response.ok) {
+      // 生成结果只在服务端保留 1 小时（JOB_TTL_SECONDS），过期后资产接口返回 404。
+      throw new Error(
+        response.status === 404
+          ? '生成结果已过期（服务端只保留 1 小时），请重新生成后再复用'
+          : `取回失败：HTTP ${response.status}`,
+      );
+    }
+    const blob = await response.blob();
+    const fileName =
+      decodeURIComponent(new URL(source, window.location.href).pathname.split('/').pop() || '') ||
+      'generated-image.png';
+    file = new File([blob], fileName, { type: blob.type || 'image/png' });
+  } catch (error) {
+    showError(
+      '无法复用这张图片',
+      `${error instanceof Error ? error.message : String(error)}\n\n` +
+        '若这张图是上游直链而非本地生成结果，浏览器会因跨域限制取不回来；请先下载再手动上传。',
+    );
+    setStatus('复用生成图失败。');
+    return;
+  }
+
+  // 走和手动上传完全相同的入口，类型、单图大小、总量、协议张数四层校验一并复用。
+  const before = uploadedReferenceImages.length;
+  await addReferenceFiles([file]);
+  if (uploadedReferenceImages.length === before) {
+    setStatus('参考图未添加，原因见上方提示。');
+    return;
+  }
+
+  switchMode('edit');
+  els['edit-image-container'].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  setStatus(
+    `已把${label}加入参考图（${uploadedReferenceImages.length}/${getProtocolConfig().maxReferenceImages}）。`,
+  );
 }
 
 async function handleIncomingFiles(fileList) {
@@ -726,16 +782,32 @@ function createMediaCard(source, type, index, entry) {
   actions.className = 'media-actions pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-ink-950/95 to-transparent pt-8 text-zinc-200 text-xs px-3 pb-2.5 flex items-center justify-between gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition';
 
   const caption = document.createElement('span');
-  caption.className = 'truncate text-left text-zinc-300';
+  // min-w-0 是 truncate 在 flex 容器里生效的前提，否则标题会把按钮挤出卡片
+  caption.className = 'min-w-0 truncate text-left text-zinc-300';
   caption.textContent = label;
+
+  const controls = document.createElement('div');
+  controls.className = 'flex items-center gap-2 shrink-0';
+
+  if (!isVideo) {
+    // 只有图片能当参考图。生成的视频不能，但生成的图片可以喂给 grok-video。
+    const reuse = document.createElement('button');
+    reuse.type = 'button';
+    reuse.className = 'pointer-events-auto bg-white/10 hover:bg-accent hover:text-ink-950 text-zinc-100 text-xs px-2.5 py-1 rounded-md border border-white/15 font-medium transition backdrop-blur-sm';
+    reuse.textContent = '用作参考图';
+    reuse.setAttribute('aria-label', `把${label}用作参考图`);
+    reuse.addEventListener('click', () => void reuseGeneratedImage(source, label));
+    controls.append(reuse);
+  }
 
   const download = document.createElement('a');
   download.className = 'pointer-events-auto bg-white/10 hover:bg-accent hover:text-ink-950 text-zinc-100 text-xs px-2.5 py-1 rounded-md border border-white/15 font-medium transition shrink-0 backdrop-blur-sm';
   download.href = source;
   download.download = `${type}_${entry.createdAt}_${index + 1}.${mediaExtension(source, type)}`;
   download.textContent = '下载';
+  controls.append(download);
 
-  actions.append(caption, download);
+  actions.append(caption, controls);
   wrapper.append(actions);
   return wrapper;
 }
