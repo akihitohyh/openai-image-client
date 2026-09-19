@@ -861,3 +861,26 @@ def test_video_asset_rejects_unsatisfiable_range(tmp_path, monkeypatch):
     assert "STATUS 416" in sent
     assert "Content-Range: bytes */100" in sent
     assert payload == b""
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-image-2", "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"],
+)
+def test_gpt_image_families_use_the_array_upload_field(model):
+    # 单张参考图是唯一会分叉的情况：多张时两条分支都会走 image[]。
+    assert web_app.edit_image_file_field(model, 1) == web_app.OPENAI_IMAGE_EDIT_ARRAY_FIELD
+
+
+def test_legacy_models_keep_the_single_upload_field():
+    assert web_app.edit_image_file_field("dall-e-3", 1) == web_app.OPENAI_IMAGE_EDIT_FILE_FIELD
+    assert web_app.edit_image_file_field("dall-e-3", 2) == web_app.OPENAI_IMAGE_EDIT_ARRAY_FIELD
+
+
+def test_transparent_background_rejection_stays_scoped_to_gpt_image_2():
+    # 2.5 是否解除该限制未知；与其武断拦截，不如让上游给出明确答复。
+    body = {}
+    with pytest.raises(ValueError, match="transparent"):
+        web_app.apply_openai_image_options(body, {"background": "transparent"}, "gpt-image-2")
+    web_app.apply_openai_image_options(body, {"background": "transparent"}, "gpt-image-2.5")
+    assert body["background"] == "transparent"

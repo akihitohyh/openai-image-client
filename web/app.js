@@ -27,8 +27,8 @@ const PROTOCOL_CONFIG = {
   'openai-image': {
     backendProtocol: 'openai',
     defaultModel: 'gpt-image-2',
-    models: ['gpt-image-2'],
-    description: 'OpenAI 生图使用 Images API，适合 gpt-image-2。',
+    models: ['gpt-image-2', 'gpt-image-2.5', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'],
+    description: 'OpenAI 生图使用 Images API，支持 gpt-image-2 与 gpt-image-2.5 系列，尺寸按画幅比例和输出档位选择。',
     promptPlaceholder: '例如: A professional minimalist workspace, cinematic lighting...',
     promptLabel: '提示词 (Prompt)',
     generateLabel: '文生图 (Generate)',
@@ -44,6 +44,8 @@ const PROTOCOL_CONFIG = {
     maxReferenceImages: OPENAI_MAX_REFERENCE_IMAGES,
     maxOutputs: 8,
     isVideo: false,
+    // 模型仍然是下拉选择，只有尺寸改用画幅比例 + 输出档位。
+    usesRatioSize: true,
   },
   'grok-image': {
     backendProtocol: 'grok',
@@ -108,6 +110,7 @@ const PROTOCOL_CONFIG = {
     maxOutputs: 8,
     isVideo: false,
     usesCustomModel: true,
+    usesRatioSize: true,
     modelPlaceholder: '例如: flux-1.1-pro',
   },
   'gemini-image': {
@@ -131,6 +134,7 @@ const PROTOCOL_CONFIG = {
     maxOutputs: 8,
     isVideo: false,
     usesCustomModel: true,
+    usesRatioSize: true,
     modelPlaceholder: '例如: gemini-2.5-flash-image',
   },
 };
@@ -156,6 +160,7 @@ const els = Object.fromEntries([
   'edit-image-container', 'reference-label', 'reference-dropzone', 'file-input',
   'upload-placeholder', 'upload-preview-grid', 'upload-count', 'clear-upload-btn',
   'prompt-label', 'prompt', 'model', 'size-label', 'size', 'preset-image-options',
+  'preset-model-option', 'preset-size-option', 'custom-model-option', 'ratio-size-options',
   'custom-image-options', 'custom_model', 'custom_ratio', 'custom_resolution', 'video-options',
   'video_resolution', 'duration', 'count-label', 'image_count', 'timeout-label',
   'timeout', 'submit-btn', 'job-status-desc', 'loader', 'cancel-btn',
@@ -211,7 +216,7 @@ function getCustomSize(ratio = els.custom_ratio.value, tier = els.custom_resolut
 }
 
 function getRequestSize() {
-  return getProtocolConfig().usesCustomModel ? getCustomSize() : els.size.value;
+  return getProtocolConfig().usesRatioSize ? getCustomSize() : els.size.value;
 }
 
 function safePersistableBaseUrl(value) {
@@ -424,12 +429,25 @@ function applyProtocolPreset(preferredModel) {
   updateProtocolButtons();
   updateModeButtons();
 
-  els['preset-image-options'].classList.toggle('hidden', Boolean(config.usesCustomModel));
-  els['custom-image-options'].classList.toggle('hidden', !config.usesCustomModel);
-  els.model.disabled = Boolean(config.usesCustomModel);
-  els.custom_model.disabled = !config.usesCustomModel;
-  els.custom_model.required = Boolean(config.usesCustomModel);
-  if (config.usesCustomModel) {
+  // 模型输入方式与尺寸输入方式是两件独立的事。它们曾经共用 usesCustomModel 这一个
+  // 开关，于是「下拉选模型 + 比例档位选尺寸」这种组合根本无法表达。
+  const usesCustomModel = Boolean(config.usesCustomModel);
+  const usesRatioSize = Boolean(config.usesRatioSize);
+
+  els['preset-model-option'].classList.toggle('hidden', usesCustomModel);
+  els['custom-model-option'].classList.toggle('hidden', !usesCustomModel);
+  els['preset-size-option'].classList.toggle('hidden', usesRatioSize);
+  els['ratio-size-options'].classList.toggle('hidden', !usesRatioSize);
+  // 外层容器只在自己两个子项都隐藏时才收起，否则会留下一段空白。
+  els['preset-image-options'].classList.toggle('hidden', usesCustomModel && usesRatioSize);
+  els['custom-image-options'].classList.toggle('hidden', !usesCustomModel && !usesRatioSize);
+  // 模型下拉和尺寸下拉并排才需要两列；只剩一个时让它占满整行。
+  els['preset-image-options'].classList.toggle('grid-cols-2', !usesRatioSize);
+
+  els.model.disabled = usesCustomModel;
+  els.custom_model.disabled = !usesCustomModel;
+  els.custom_model.required = usesCustomModel;
+  if (usesCustomModel) {
     els.custom_model.placeholder = config.modelPlaceholder || '请输入模型名称';
   }
   updateCustomResolutionOptions();

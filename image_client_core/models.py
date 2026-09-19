@@ -61,6 +61,26 @@ def is_gpt_image_2(model: str) -> bool:
     return value == "gpt-image-2" or value.startswith("gpt-image-2-")
 
 
+def is_gpt_image_2_5(model: str) -> bool:
+    """``gpt-image-2.5`` 及其变体（``-flare`` / ``-sunburst``）。
+
+    刻意与 :func:`is_gpt_image_2` 分开：后者只认 ``gpt-image-2-`` 这个连字符前缀，
+    ``gpt-image-2.5`` 是点号，本来就匹配不上。两个系列的能力并不完全相同，合并成
+    一个判定会把 gpt-image-2 的限制无依据地套到 2.5 上。
+    """
+    value = str(model or "").strip().lower()
+    return value == "gpt-image-2.5" or value.startswith("gpt-image-2.5-")
+
+
+def uses_openai_image_array_field(model: str) -> bool:
+    """图生图上传参考图时该用 ``image[]`` 还是 ``image``。
+
+    ``image[]`` 是 gpt-image-2 引入的写法，2.5 系列沿用。发错字段上游直接 400，
+    且错误信息不会说明原因——正是模块开头记录的那个坑。
+    """
+    return is_gpt_image_2(model) or is_gpt_image_2_5(model)
+
+
 def is_grok_image_model(model: str) -> bool:
     value = str(model or "").strip().lower()
     return value == "grok-imagine" or any(

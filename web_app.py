@@ -44,6 +44,7 @@ from image_client_core.models import (
     is_gpt_image_2,
     is_grok_image_model,
     is_grok_video_model,
+    uses_openai_image_array_field,
 )
 from image_client_core.responses import (
     decode_base64_limited,
@@ -1687,7 +1688,7 @@ def normalize_edit_model(model: str) -> str:
 
 
 def edit_image_file_field(model: str, image_count: int) -> str:
-    if is_gpt_image_2(model) or image_count > 1:
+    if uses_openai_image_array_field(model) or image_count > 1:
         return OPENAI_IMAGE_EDIT_ARRAY_FIELD
     return OPENAI_IMAGE_EDIT_FILE_FIELD
 

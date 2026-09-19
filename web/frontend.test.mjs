@@ -176,3 +176,65 @@ test('compiled stylesheet carries the new preview utilities', () => {
     assert.ok(stylesCss.includes(utility), `${utility} must be compiled into styles.css`);
   }
 });
+
+test('OpenAI protocol offers the gpt-image-2 and gpt-image-2.5 families', () => {
+  const source = appJs.match(/'openai-image': \{([\s\S]*?)\n  \},/)?.[1] || '';
+  assert.ok(source, "the 'openai-image' protocol config must exist");
+  // vm 里求值出来的数组来自另一个 realm，原型不同，必须先过一次 JSON 才能 deepEqual
+  const models = JSON.parse(
+    JSON.stringify(vm.runInNewContext(`(${source.match(/models: (\[[^\]]*\])/)?.[1]})`)),
+  );
+  assert.deepEqual(models, [
+    'gpt-image-2',
+    'gpt-image-2.5',
+    'gpt-image-2.5-flare',
+    'gpt-image-2.5-sunburst',
+  ]);
+  // 默认模型必须在列表里，否则 loadSettings 会回落到一个下拉中不存在的值
+  const defaultModel = source.match(/defaultModel: '([^']*)'/)?.[1];
+  assert.ok(models.includes(defaultModel), `defaultModel ${defaultModel} must be selectable`);
+});
+
+test('every protocol preset keeps its default model selectable', () => {
+  // updateModelOptions 只渲染 config.models，defaultModel 不在其中就会选出空值
+  const configs = appJs.match(/'[a-z-]+': \{[\s\S]*?\n  \},/g) || [];
+  assert.ok(configs.length >= 5, 'expected all protocol presets to be found');
+  for (const config of configs) {
+    const name = config.match(/^'([a-z-]+)'/)?.[1];
+    const raw = config.match(/models: (\[[^\]]*\])/)?.[1];
+    if (!raw) continue;
+    const models = vm.runInNewContext(`(${raw})`);
+    const defaultModel = config.match(/defaultModel: '([^']*)'/)?.[1] ?? '';
+    if (models.length === 0) continue; // 自定义模型协议由用户手填
+    assert.ok(models.includes(defaultModel), `${name}: defaultModel ${defaultModel} not in models`);
+  }
+});
+
+test('model input and size input are independently switchable', () => {
+  // 两者曾共用 usesCustomModel，导致「下拉选模型 + 比例档位选尺寸」无法表达
+  const block = appJs.match(/const PROTOCOL_CONFIG = \{([\s\S]*?)\n\};/)?.[1] || '';
+  const actual = {};
+  for (const [, name, body] of block.matchAll(/'([a-z-]+)': \{([\s\S]*?)\n  \},/g)) {
+    actual[name] = {
+      customModel: /usesCustomModel: true/.test(body),
+      ratioSize: /usesRatioSize: true/.test(body),
+    };
+  }
+  assert.deepEqual(actual, {
+    'openai-image': { customModel: false, ratioSize: true },
+    'grok-image': { customModel: false, ratioSize: false },
+    'grok-video': { customModel: false, ratioSize: false },
+    'custom-image': { customModel: true, ratioSize: true },
+    'gemini-image': { customModel: true, ratioSize: true },
+  });
+  // 尺寸来源看 usesRatioSize，模型来源看 usesCustomModel，不能再混用
+  assert.match(appJs, /usesRatioSize \? getCustomSize\(\) : els\.size\.value/);
+  assert.match(appJs, /usesCustomModel \? els\.custom_model\.value\.trim\(\) : els\.model\.value/);
+});
+
+test('markup exposes the four independently toggled option blocks', () => {
+  for (const id of ['preset-model-option', 'preset-size-option', 'custom-model-option', 'ratio-size-options']) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`), `#${id} must exist in the markup`);
+    assert.match(appJs, new RegExp(`'${id}'`), `#${id} must be wired in app.js`);
+  }
+});

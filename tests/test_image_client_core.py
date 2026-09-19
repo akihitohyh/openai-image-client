@@ -28,6 +28,7 @@ SHARED_NAMES = {
     "grok_video_aspect_ratio_from_size",
     "grok_video_resolution_from_size",
     "is_gpt_image_2",
+    "is_gpt_image_2_5",
     "is_grok_image_model",
     "is_grok_video_model",
     "join_url",
@@ -38,6 +39,7 @@ SHARED_NAMES = {
     "parse_size",
     "preview_response_body",
     "read_limited_response",
+    "uses_openai_image_array_field",
     "response_diagnostic",
     "response_json_limited",
     "video_poll_endpoint_from_generation",
@@ -204,3 +206,30 @@ def test_non_object_json_is_rejected() -> None:
         responses.response_json_limited(FakeResponse(b"[1, 2, 3]"))
     with pytest.raises(ValueError, match="不合法"):
         responses.response_json_limited(FakeResponse(b"<html>login</html>"))
+
+
+def test_gpt_image_2_5_is_a_separate_family() -> None:
+    # 点号不是连字符：is_gpt_image_2 的 "gpt-image-2-" 前缀本来就匹配不上 2.5，
+    # 两个系列的能力也不同，所以刻意不合并成一个判定。
+    for value in ("gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"):
+        assert models.is_gpt_image_2_5(value) is True
+        assert models.is_gpt_image_2(value) is False
+    for value in ("GPT-Image-2.5", "  gpt-image-2.5-flare  "):
+        assert models.is_gpt_image_2_5(value) is True
+    for value in ("gpt-image-2", "gpt-image-25", "gpt-image-2.6", "dall-e-3", "", None):
+        assert models.is_gpt_image_2_5(value) is False
+
+
+def test_image_array_field_covers_both_gpt_image_families() -> None:
+    # 发错字段上游只回一个没有原因的 400，所以这里必须钉死。
+    for value in (
+        "gpt-image-2",
+        "gpt-image-2-mini",
+        "gpt-image-2.5",
+        "gpt-image-2.5-flare",
+        "gpt-image-2.5-sunburst",
+        "GPT-Image-2.5",
+    ):
+        assert models.uses_openai_image_array_field(value) is True
+    for value in ("dall-e-3", "gpt-image-3", "", None):
+        assert models.uses_openai_image_array_field(value) is False

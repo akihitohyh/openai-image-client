@@ -99,13 +99,13 @@
                 </div>
 
                 <div id="preset-image-options" class="grid grid-cols-2 gap-3">
-                    <div>
+                    <div id="preset-model-option">
                         <label for="model" class="field-label">模型 (Model)</label>
                         <select id="model" class="field">
                             <option value="gpt-image-2">gpt-image-2</option>
                         </select>
                     </div>
-                    <div>
+                    <div id="preset-size-option">
                         <label id="size-label" for="size" class="field-label">分辨率 (Size)</label>
                         <select id="size" class="field">
                             <option value="1024x1024">1024x1024</option>
@@ -118,11 +118,11 @@
                 </div>
 
                 <div id="custom-image-options" class="hidden space-y-3 animate-fade-in">
-                    <div>
+                    <div id="custom-model-option">
                         <label for="custom_model" class="field-label">模型名称 (Model)</label>
                         <input type="text" id="custom_model" maxlength="200" spellcheck="false" autocomplete="off" placeholder="例如: flux-1.1-pro" class="field font-mono">
                     </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div id="ratio-size-options" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
                             <label for="custom_ratio" class="field-label">画幅比例</label>
                             <select id="custom_ratio" class="field">

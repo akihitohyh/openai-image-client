@@ -32,6 +32,7 @@ from image_client_core.models import (
     is_gpt_image_2,
     is_grok_image_model,
     is_grok_video_model,
+    uses_openai_image_array_field,
 )
 from image_client_core.responses import (
     decode_base64_limited,
@@ -263,7 +264,7 @@ def load_image_paths(raw_paths: list[str]) -> list[Path]:
 
 
 def openai_edit_file_field(model: str, image_count: int) -> str:
-    if is_gpt_image_2(model) or image_count > 1:
+    if uses_openai_image_array_field(model) or image_count > 1:
         return "image[]"
     return "image"
 
