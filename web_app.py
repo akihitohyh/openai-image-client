@@ -1049,9 +1049,14 @@ def request_image_stream(
 def extract_video_urls(data: dict) -> list[str]:
     videos: list[str] = []
 
+    # video_url 是原始媒体地址, video.url 可能是同一视频的鉴权中转地址.
+    # 优先采用原始地址, 避免重复结果和不必要的网关内容请求.
+    video_url = data.get("video_url")
     video = data.get("video")
-    if isinstance(video, dict) and video.get("url"):
-        videos.append(str(video["url"]))
+    if not video_url and isinstance(video, dict):
+        video_url = video.get("url")
+    if video_url:
+        videos.append(str(video_url))
 
     for key in ("videos", "data"):
         items = data.get(key)
@@ -1365,22 +1370,22 @@ def request_grok_video_api(
             )
         )
 
+    relay_endpoint = ""
     try:
         videos = resolve_video_result_urls(videos, last_endpoint)
         # 网关代理地址要在这里换成内容本身；留给浏览器只会 401。
-        videos = [
-            download_relay_video_data_url(url, api_key, timeout)
-            if is_gateway_relay_video_url(url, last_endpoint)
-            else url
-            for url in videos
-        ]
+        for index, url in enumerate(videos):
+            if is_gateway_relay_video_url(url, last_endpoint):
+                relay_endpoint = url
+                videos[index] = download_relay_video_data_url(url, api_key, timeout)
     except RequestException as exc:
         raise RuntimeError(
             json.dumps(
                 {
                     "message": f"下载网关视频内容失败: {type(exc).__name__}: {exc}",
-                    "last_endpoint": last_endpoint,
+                    "last_endpoint": relay_endpoint or last_endpoint,
                     "client_request_id": client_request_id,
+                    "upstream_request_id": request_id,
                     "raw": raw_results[-1] if len(raw_results) == 1 else raw_results,
                 },
                 ensure_ascii=False,
@@ -1393,8 +1398,9 @@ def request_grok_video_api(
             json.dumps(
                 {
                     "message": str(exc),
-                    "last_endpoint": last_endpoint,
+                    "last_endpoint": relay_endpoint or last_endpoint,
                     "client_request_id": client_request_id,
+                    "upstream_request_id": request_id,
                     "raw": raw_results[-1] if len(raw_results) == 1 else raw_results,
                 },
                 ensure_ascii=False,

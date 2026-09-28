@@ -721,6 +721,69 @@ def test_remote_video_urls_are_not_materialized(tmp_path, monkeypatch):
     assert stored["videos"] == ["https://cdn.x.ai/a.mp4"]
     assert not (tmp_path / "job-id").exists()
 
+@pytest.mark.parametrize("async_result", [False, True])
+def test_original_video_url_is_used_instead_of_gateway_relay(monkeypatch, async_result):
+    calls = []
+    original_url = "https://1.1.1.1/m/generated-video"
+    result_body = {
+        "request_id": "task-1",
+        "status": "done",
+        "video": {"url": "/v1/videos/task-1/content"},
+        "video_url": original_url,
+    }
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs.get("headers", {}).get("Authorization")))
+        if method == "POST":
+            return FakeResponse({"request_id": "task-1"} if async_result else result_body)
+        if url == "https://8.8.8.8/v1/videos/task-1":
+            return FakeResponse(result_body)
+        raise AssertionError("原始视频地址存在时不应请求网关内容接口或向 CDN 发送 Key")
+
+    monkeypatch.setattr(web_app, "safe_http_request", fake_request)
+    monkeypatch.setattr(web_app.time, "sleep", lambda _seconds: None)
+    result = web_app.request_grok_video_api(
+        "https://8.8.8.8/v1",
+        "secret-key",
+        30,
+        json_body={"model": "grok-imagine-video-1.5", "prompt": "p"},
+        poll_interval=1,
+    )
+    assert result["videos"] == [original_url]
+    assert result["media"] == [{"type": "video", "url": original_url}]
+    assert len(calls) == (2 if async_result else 1)
+    assert all(auth == "Bearer secret-key" for _, _, auth in calls)
+
+
+def test_video_url_only_response_is_recognized(monkeypatch):
+    original_url = "https://1.1.1.1/video.mp4"
+    monkeypatch.setattr(
+        web_app, "safe_http_request",
+        lambda *args, **kwargs: FakeResponse({"video_url": original_url}),
+    )
+    result = web_app.request_grok_video_api(
+        "https://8.8.8.8/v1", "secret-key", 30,
+        json_body={"model": "grok-imagine-video-1.5", "prompt": "p"},
+    )
+    assert result["videos"] == [original_url]
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "http://127.0.0.1/private.mp4"])
+def test_original_video_url_still_enforces_outbound_validation(monkeypatch, url):
+    monkeypatch.setattr(
+        web_app, "safe_http_request",
+        lambda *args, **kwargs: FakeResponse({
+            "video_url": url,
+            "video": {"url": "/v1/videos/task-1/content"},
+        }),
+    )
+    with pytest.raises(RuntimeError, match="视频结果 URL"):
+        web_app.request_grok_video_api(
+            "https://8.8.8.8/v1", "secret-key", 30,
+            json_body={"model": "grok-imagine-video-1.5", "prompt": "p"},
+        )
+
+
 def test_sub2api_relay_video_is_downloaded_with_the_api_key(monkeypatch):
     """sub2api 把 video.url 改写成 /v1/videos/<id>/content，该路由挂了 apiKeyAuth。"""
     seen = {}
@@ -782,7 +845,30 @@ def test_relay_video_download_failure_reports_diagnostics(monkeypatch):
         )
     payload = json.loads(str(excinfo.value))
     assert "HTTP 401" in payload["message"]
+    assert payload["last_endpoint"] == "https://8.8.8.8/v1/videos/req-1/content"
     assert payload["raw"]["video"]["url"] == "/v1/videos/req-1/content"
+
+
+def test_relay_video_network_failure_reports_content_endpoint(monkeypatch):
+    def fake_request(method, url, **kwargs):
+        if method == "POST":
+            return FakeResponse({
+                "request_id": "req-1",
+                "status": "done",
+                "video": {"url": "/v1/videos/req-1/content"},
+            })
+        raise RequestException("connection interrupted")
+
+    monkeypatch.setattr(web_app, "safe_http_request", fake_request)
+    with pytest.raises(RuntimeError) as excinfo:
+        web_app.request_grok_video_api(
+            "https://8.8.8.8/v1", "secret-key", 30,
+            json_body={"model": "grok-imagine-video", "prompt": "p"},
+        )
+    payload = json.loads(str(excinfo.value))
+    assert payload["last_endpoint"] == "https://8.8.8.8/v1/videos/req-1/content"
+    assert payload["upstream_request_id"] == "req-1"
+    assert "connection interrupted" in payload["message"]
 
 
 @pytest.mark.parametrize(
