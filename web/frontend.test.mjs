@@ -33,7 +33,7 @@ test('cancel button uses the backend DELETE job contract', () => {
 
 test('download names preserve local asset media extensions', () => {
   assert.match(appJs, /new URL\(String\(source\), window\.location\.href\)\.pathname/);
-  assert.match(appJs, /\['png', 'jpg', 'jpeg', 'webp', 'gif'\]\.includes\(extension\)/);
+  assert.match(appJs, /\['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'\]\.includes\(extension\)/);
   assert.match(appJs, /\['mp4', 'webm'\]\.includes\(extension\)/);
 });
 
@@ -177,7 +177,7 @@ test('compiled stylesheet carries the new preview utilities', () => {
   }
 });
 
-test('OpenAI protocol offers the gpt-image-2 and gpt-image-2.5 families', () => {
+test('OpenAI protocol offers the gpt-image-2, 2.5 and 2.6 families', () => {
   const source = appJs.match(/'openai-image': \{([\s\S]*?)\n  \},/)?.[1] || '';
   assert.ok(source, "the 'openai-image' protocol config must exist");
   // vm 里求值出来的数组来自另一个 realm，原型不同，必须先过一次 JSON 才能 deepEqual
@@ -189,6 +189,8 @@ test('OpenAI protocol offers the gpt-image-2 and gpt-image-2.5 families', () => 
     'gpt-image-2.5',
     'gpt-image-2.5-flare',
     'gpt-image-2.5-sunburst',
+    'gpt-image-2.6-sunburst',
+    'gpt-image-2.6-flare',
   ]);
   // 默认模型必须在列表里，否则 loadSettings 会回落到一个下拉中不存在的值
   const defaultModel = source.match(/defaultModel: '([^']*)'/)?.[1];
@@ -257,9 +259,10 @@ test('generated images can be reused as edit references', () => {
 
 test('the reuse button is image-only and re-enables pointer events', () => {
   const body = appJs.match(/function createMediaCard\(([\s\S]*?)\n\}/)?.[1] || '';
-  // `if (!isVideo) {` 之后的那一段就是图片专属分支
-  const imageOnlyBlock = (body.split('if (!isVideo) {')[1] || '').split('\n  }')[0];
-  assert.ok(imageOnlyBlock, 'the reuse button must sit behind an !isVideo guard');
+  // `if (canReuse) {` 之后的那一段就是可复用图片的专属分支
+  assert.match(body, /const canReuse = !isVideo && !\['gif', 'svg'\]\.includes\(mediaExtension\(source, type\)\)/);
+  const imageOnlyBlock = (body.split('if (canReuse) {')[1] || '').split('\n  }')[0];
+  assert.ok(imageOnlyBlock, 'the reuse button must sit behind the canReuse guard');
   assert.match(imageOnlyBlock, /reuse\.addEventListener\('click'/);
   // 底部渐变条是 pointer-events-none 的，按钮必须自己开回来才能点
   assert.match(imageOnlyBlock, /reuse\.className = '[^']*pointer-events-auto/);
@@ -278,4 +281,39 @@ test('reference size limits stay within the backend request body cap', () => {
   assert.ok((total * 4) / 3 < 48, `total ${total}MB becomes ${(total * 4) / 3}MB after base64, over the 48MB body cap`);
   // 警告文案必须从常量推导，不能再写死数字
   assert.match(appJs, /单张不能超过 \$\{formatBytes\(MAX_REFERENCE_IMAGE_BYTES\)\}/);
+});
+
+test('GPT Image 2.6 options only apply to 2.6 models in the OpenAI protocol', () => {
+  // 选项组的显示条件和请求字段的发送条件必须是同一个判断，否则切回旧模型会把新字段带给上游
+  assert.match(appJs, /function gptImage26OptionsActive\(\) \{\s*return getSelectedProtocol\(\) === 'openai-image' && isGptImage26Model\(els\.model\.value\);/);
+  const isGptImage26Model = vm.runInNewContext(
+    `(${appJs.match(/function isGptImage26Model\(model\) \{[\s\S]*?\n\}/)?.[0]})`,
+  );
+  for (const model of ['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare', 'GPT-Image-2.6', ' gpt-image-2.6-sunburst ']) {
+    assert.equal(isGptImage26Model(model), true, model);
+  }
+  for (const model of ['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-2.60', 'my-gpt-image-2.6']) {
+    assert.equal(isGptImage26Model(model), false, model);
+  }
+  const payloadBody = appJs.match(/async function createPayload\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(payloadBody, /if \(gptImage26OptionsActive\(\)\) \{/);
+  // GIF 帧参数只跟 GIF 走，SVG 编写模型只跟 SVG 走
+  assert.match(payloadBody, /if \(outputFormat === 'gif'\) \{\s*payload\.frame_count/);
+  assert.match(payloadBody, /if \(outputFormat === 'svg'\) \{[\s\S]*?payload\.svg_model/);
+});
+
+test('GPT Image 2.6 controls match the official parameter ranges', () => {
+  assert.match(indexHtml, /<select id="output_format"[\s\S]*?value="gif"[\s\S]*?value="svg"/);
+  assert.match(indexHtml, /<select id="complexity"[\s\S]*?value="low"[\s\S]*?value="medium"[\s\S]*?value="high"/);
+  assert.match(indexHtml, /id="frame_count" value="9" min="2" max="16"/);
+  assert.match(indexHtml, /id="frame_duration_ms" value="200" min="20" max="2000" step="10"/);
+  assert.match(appJs, /GIF_FRAME_COUNT = \{ min: 2, max: 16, fallback: 9 \}/);
+  assert.match(appJs, /GIF_FRAME_DURATION_MS = \{ min: 20, max: 2000, fallback: 200 \}/);
+  assert.match(appJs, /SVG_REASONING_EFFORTS = \['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'\]/);
+});
+
+test('SVG requests are rejected for edits and multiple outputs before submission', () => {
+  const body = appJs.match(/function validatePayload\(payload\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(body, /payload\.output_format === 'svg' && payload\.mode === 'edit'/);
+  assert.match(body, /payload\.output_format === 'svg' && payload\.n !== 1/);
 });

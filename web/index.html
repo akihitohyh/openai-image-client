@@ -124,6 +124,58 @@
                     </div>
                 </div>
 
+                <div id="gpt-image-26-options" class="hidden space-y-3 animate-fade-in">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="output_format" class="field-label">输出格式</label>
+                            <select id="output_format" class="field">
+                                <option value="">PNG 图片（默认）</option>
+                                <option value="gif">GIF 动图</option>
+                                <option value="svg">SVG 矢量图</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="complexity" class="field-label">复杂度 (Complexity)</label>
+                            <select id="complexity" class="field">
+                                <option value="">自动（默认 high）</option>
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="gif-options" class="hidden grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="frame_count" class="field-label">GIF 帧数 (2–16)</label>
+                            <input type="number" id="frame_count" value="9" min="2" max="16" class="field font-mono">
+                        </div>
+                        <div>
+                            <label for="frame_duration_ms" class="field-label">每帧时长 (毫秒)</label>
+                            <input type="number" id="frame_duration_ms" value="200" min="20" max="2000" step="10" class="field font-mono">
+                        </div>
+                    </div>
+                    <div id="svg-options" class="hidden grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="svg_model" class="field-label">SVG 编写模型 (可选)</label>
+                            <input type="text" id="svg_model" maxlength="200" spellcheck="false" autocomplete="off" placeholder="留空 = 上游默认" class="field font-mono">
+                        </div>
+                        <div>
+                            <label for="svg_reasoning_effort" class="field-label">SVG 推理强度</label>
+                            <select id="svg_reasoning_effort" class="field">
+                                <option value="">默认</option>
+                                <option value="none">none</option>
+                                <option value="minimal">minimal</option>
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                                <option value="xhigh">xhigh</option>
+                                <option value="max">max</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p id="gpt-image-26-hint" class="text-[11px] text-zinc-500 leading-relaxed" aria-live="polite"></p>
+                </div>
+
                 <div id="custom-image-options" class="hidden space-y-3 animate-fade-in">
                     <div id="custom-model-option">
                         <label for="custom_model" class="field-label">模型名称 (Model)</label>

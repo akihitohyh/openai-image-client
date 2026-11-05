@@ -37,6 +37,7 @@ from image_client_core.models import (
     GROK_SUPPORTED_RATIOS,
     GROK_VIDEO_RESOLUTION_VALUES,
     GROK_VIDEO_SUPPORTED_RATIOS,
+    build_gpt_image_format_options,
     grok_aspect_ratio_from_size,
     grok_resolution_from_size,
     grok_video_aspect_ratio_from_size,
@@ -44,6 +45,7 @@ from image_client_core.models import (
     is_gpt_image_2,
     is_grok_image_model,
     is_grok_video_model,
+    sniff_image_mime,
     uses_openai_image_array_field,
 )
 from image_client_core.responses import (
@@ -562,7 +564,14 @@ def image_mime_from_format(output_format: str) -> str:
         return "image/webp"
     if value == "gif":
         return "image/gif"
+    if value == "svg":
+        return "image/svg+xml"
     return "image/png"
+
+
+def image_mime_from_bytes(data: bytes, output_format: str) -> str:
+    # 文件头比格式字段可靠：认得出就以文件头为准，认不出再按 output_format 推断。
+    return sniff_image_mime(data) or image_mime_from_format(output_format)
 
 
 def data_url_from_remote(image_url: str, timeout: int) -> str:
@@ -606,17 +615,22 @@ def stream_image_data_url(value: str, output_format: str, timeout: int) -> str:
             return data_url_from_remote(raw, timeout=timeout)
         except RequestException:
             return raw
-    mime = image_mime_from_format(output_format)
-    return data_url_from_bytes(decode_base64_limited(raw, MAX_REMOTE_MEDIA_BYTES, "图像数据"), mime)
+    image_bytes = decode_base64_limited(raw, MAX_REMOTE_MEDIA_BYTES, "图像数据")
+    return data_url_from_bytes(image_bytes, image_mime_from_bytes(image_bytes, output_format))
 
 
-def image_item_to_data_url(item: dict, timeout: int) -> str:
+def image_item_to_data_url(item: dict, timeout: int, fallback_output_format: str = "") -> str:
+    """把一个 ``data[]`` 元素转成浏览器能直接显示的地址。
+
+    官方 Images API 把 ``output_format`` 放在响应顶层，``fallback_output_format``
+    就是用来接它的；元素自己带了格式时仍以元素为准。
+    """
     if not isinstance(item, dict):
         raise ValueError("图像项格式不正确")
+    output_format = str(item.get("output_format") or fallback_output_format or "").strip()
     if item.get("b64_json"):
-        output_format = str(item.get("output_format", "")).strip()
         image_bytes = decode_base64_limited(str(item["b64_json"]), MAX_REMOTE_MEDIA_BYTES, "上游图像")
-        return data_url_from_bytes(image_bytes, image_mime_from_format(output_format))
+        return data_url_from_bytes(image_bytes, image_mime_from_bytes(image_bytes, output_format))
     if item.get("url"):
         image_url = str(item["url"])
         try:
@@ -626,7 +640,7 @@ def image_item_to_data_url(item: dict, timeout: int) -> str:
     if item.get("result"):
         return stream_image_data_url(
             str(item["result"]),
-            str(item.get("output_format", "")).strip(),
+            output_format,
             timeout,
         )
     raise ValueError("返回里没有可用的图像字段")
@@ -682,11 +696,12 @@ def parse_image_api_response(data: dict, timeout: int, client_request_id: str, l
 
     images: list[str] = []
     total_media_bytes = 0
+    response_output_format = str(data.get("output_format") or "").strip()
     for item in items[:MAX_UPSTREAM_MEDIA_ITEMS]:
         if not isinstance(item, dict):
             continue
         try:
-            image = image_item_to_data_url(item, timeout=timeout)
+            image = image_item_to_data_url(item, timeout=timeout, fallback_output_format=response_output_format)
         except ValueError:
             continue
         total_media_bytes += data_url_payload_size(image)
@@ -1432,12 +1447,36 @@ def payload_text_lower(payload: dict, key: str, default: str = "") -> str:
     return payload_text(payload, key, default).lower()
 
 
-def apply_openai_image_options(request_body: dict, payload: dict, model: str) -> None:
+def apply_openai_image_options(
+    request_body: dict,
+    payload: dict,
+    model: str,
+    *,
+    mode: str = "generate",
+    stream: bool = False,
+) -> None:
     quality = payload_text_lower(payload, "quality")
     output_format = payload_text_lower(payload, "output_format")
     background = payload_text_lower(payload, "background")
     moderation = payload_text_lower(payload, "moderation")
     output_compression = payload.get("output_compression")
+
+    # GPT Image 2.6：复杂度、GIF 帧参数、SVG 编写模型。规则在 image_client_core 里，
+    # CLI 将来要支持时也走同一份校验。
+    request_body.update(
+        build_gpt_image_format_options(
+            output_format=output_format,
+            complexity=payload_text_lower(payload, "complexity"),
+            frame_count=payload.get("frame_count"),
+            frame_duration_ms=payload.get("frame_duration_ms"),
+            svg_model=payload_text(payload, "svg_model"),
+            svg_reasoning_effort=payload_text_lower(payload, "svg_reasoning_effort"),
+            background=background,
+            mode=mode,
+            image_count=int(request_body.get("n", 1) or 1),
+            stream=stream,
+        )
+    )
 
     if quality:
         request_body["quality"] = quality
@@ -1657,7 +1696,7 @@ def generate_images(payload: dict, *, should_cancel: CancelCheck = None) -> dict
             "size": size,
             "n": image_count,
         }
-        apply_openai_image_options(request_body, payload, model)
+        apply_openai_image_options(request_body, payload, model, mode="generate")
 
     return request_image_api(
         base_url,
@@ -1798,7 +1837,7 @@ def edit_images(payload: dict, *, should_cancel: CancelCheck = None) -> dict:
         "size": size,
         "n": str(image_count),
     }
-    apply_openai_image_options(request_data, payload, model)
+    apply_openai_image_options(request_data, payload, model, mode="edit")
     request_data = {key: str(value) for key, value in request_data.items()}
     files = build_edit_image_files(payload, model)
     return request_image_api(
@@ -1844,7 +1883,7 @@ def build_stream_request(payload: dict) -> tuple[str, str, int, str, dict | None
             "stream": True,
             "partial_images": partial_images,
         }
-        apply_openai_image_options(request_body, payload, model)
+        apply_openai_image_options(request_body, payload, model, mode="generate", stream=True)
         return base_url, api_key, timeout, "images/generations", request_body, None, None
 
     if mode != "edit":
@@ -1863,7 +1902,7 @@ def build_stream_request(payload: dict) -> tuple[str, str, int, str, dict | None
         "stream": "true",
         "partial_images": str(partial_images),
     }
-    apply_openai_image_options(request_data, payload, normalized_model)
+    apply_openai_image_options(request_data, payload, normalized_model, mode="edit", stream=True)
     request_data = {key: str(value) for key, value in request_data.items()}
     files = build_edit_image_files(payload, normalized_model)
     return base_url, api_key, timeout, "images/edits", None, request_data, files
@@ -1926,6 +1965,22 @@ def validate_request_payload(payload: dict) -> None:
             raise ValueError("Gemini aspect_ratio 不支持")
         if image_size not in GEMINI_IMAGE_SIZES:
             raise ValueError("Gemini resolution 必须是 1K、2K 或 4K")
+    if protocol == "openai" and not is_video:
+        if len(payload_text(payload, "svg_model")) > MAX_MODEL_CHARS:
+            raise ValueError(f"svg_model 不能超过 {MAX_MODEL_CHARS} 个字符")
+        # 提交异步任务前就把 GIF/SVG 的组合限制查一遍，用户当场看到原因，
+        # 而不是排队等到任务失败。
+        build_gpt_image_format_options(
+            output_format=payload_text_lower(payload, "output_format"),
+            complexity=payload_text_lower(payload, "complexity"),
+            frame_count=payload.get("frame_count"),
+            frame_duration_ms=payload.get("frame_duration_ms"),
+            svg_model=payload_text(payload, "svg_model"),
+            svg_reasoning_effort=payload_text_lower(payload, "svg_reasoning_effort"),
+            background=payload_text_lower(payload, "background"),
+            mode=mode,
+            image_count=bounded_payload_int(payload, "n", 1, 1, MAX_IMAGE_COUNT),
+        )
     if mode == "edit":
         images = get_edit_image_payloads(payload)
         total_bytes = 0
@@ -2003,6 +2058,7 @@ MEDIA_SUFFIX_BY_MIME = {
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
     "image/gif": ".gif",
+    "image/svg+xml": ".svg",
     "video/mp4": ".mp4",
     "video/webm": ".webm",
     "video/quicktime": ".mov",
@@ -2545,6 +2601,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                 length, status = end - start + 1, 206
             self.send_response(status)
             self.send_header("Content-Type", content_type)
+            if content_type == "image/svg+xml":
+                # SVG 是可以带脚本的文档。<img> 里显示不会执行脚本，但用户可能在新标签页
+                # 直接打开资源地址；再叠一层只允许内联样式的沙箱策略，彻底禁掉脚本和外链。
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+                )
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(length))
             self.send_header("ETag", etag)

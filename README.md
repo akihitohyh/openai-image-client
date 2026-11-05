@@ -104,6 +104,26 @@ python web_app.py
 
 默认只监听 `http://127.0.0.1:8000`。如果端口占用，会尝试后续端口；使用 `--strict-port` 可关闭该行为。
 
+### GPT Image 2.6：复杂度、GIF 动图与 SVG 矢量图
+
+在“OpenAI 生图”中选择 `gpt-image-2.6-sunburst` 或 `gpt-image-2.6-flare` 后，会出现以下选项（其他模型不会显示，也不会发送这些字段）。取值以 OpenAI 官方 [API 参考](https://developers.openai.com/api/reference/resources/images/methods/generate) 和 [图像生成指南](https://developers.openai.com/api/docs/guides/image-generation) 为准：
+
+| 选项 | 请求字段 | 取值 | 说明 |
+| --- | --- | --- | --- |
+| 复杂度 | `complexity` | `low` / `medium` / `high` | 控制模型动笔前的规划量，与画质 `quality` 无关；留“自动”时上游默认 `high` |
+| 输出格式 | `output_format` | 默认 PNG / `gif` / `svg` | |
+| GIF 帧数 | `frame_count` | 2–16，默认 9 | 仅 GIF；每帧按所选尺寸生成，帧数和尺寸要在上游像素预算内 |
+| 每帧时长 | `frame_duration_ms` | 20–2000 毫秒，默认 200 | 仅 GIF；上游按 10 ms 取整 |
+| SVG 编写模型 | `svg.model` | 可选 | 仅 SVG；只有账号开通“SVG 模型选择”时才填，否则留空、不发送 |
+| SVG 推理强度 | `svg.reasoning.effort` | `none` … `max` | 仅 SVG，且必须同时填写 SVG 编写模型 |
+
+限制：
+
+- SVG 只支持文生图，且一次只能生成 1 张（`n=1`）。
+- GIF 和 SVG 都不支持流式返回；Web UI 本来就走异步任务，不受影响，`/api/generate-stream` 会直接拒绝。
+- GIF / SVG 结果不能再“用作参考图”（上游参考图只接受 PNG / JPG / WEBP）。
+- 返回格式以文件头识别（官方把 `output_format` 放在响应顶层，部分中转会丢掉），SVG 资源额外附带沙箱 CSP，直接在新标签页打开也不会执行脚本。
+
 ### Gemini 原生生图
 
 在 Web UI 中选择“Gemini 生图”，填写 Base URL、API Key 和模型名称。模型名称不会固定，可以填写官方模型或兼容代理提供的模型标识。

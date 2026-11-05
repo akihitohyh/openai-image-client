@@ -104,6 +104,26 @@ python web_app.py
 
 It listens only on `http://127.0.0.1:8000` by default. If the port is occupied, it tries subsequent ports; use `--strict-port` to disable that behavior.
 
+### GPT Image 2.6: Complexity, Animated GIF, and SVG Output
+
+Selecting `gpt-image-2.6-sunburst` or `gpt-image-2.6-flare` under **OpenAI Image** reveals the options below. Other models neither show nor send these fields. Values follow the official OpenAI [API reference](https://developers.openai.com/api/reference/resources/images/methods/generate) and [image generation guide](https://developers.openai.com/api/docs/guides/image-generation):
+
+| Option | Request field | Values | Notes |
+| --- | --- | --- | --- |
+| Complexity | `complexity` | `low` / `medium` / `high` | Planning effort, independent of `quality`; "Auto" leaves the upstream default (`high`) |
+| Output format | `output_format` | default PNG / `gif` / `svg` | |
+| GIF frames | `frame_count` | 2–16, default 9 | GIF only; every frame uses the selected size, so frames × size must fit the upstream pixel budget |
+| Frame duration | `frame_duration_ms` | 20–2000 ms, default 200 | GIF only; rounded to 10 ms upstream |
+| SVG author model | `svg.model` | optional | SVG only; set it only when the account has SVG model selection, otherwise leave it empty so it is not sent |
+| SVG reasoning effort | `svg.reasoning.effort` | `none` … `max` | SVG only, and requires an SVG author model |
+
+Limits:
+
+- SVG is text-to-image only and always `n=1`.
+- GIF and SVG cannot stream. The Web UI already uses async jobs; `/api/generate-stream` rejects them.
+- GIF and SVG results cannot be reused as references (the upstream accepts PNG, JPEG, and WebP only).
+- Result types are detected from file signatures (the official API puts `output_format` at the top level and some relays drop it). SVG assets carry an extra sandboxing CSP, so opening one in a new tab cannot run scripts.
+
 ### Native Gemini Image Generation
 
 Select **Gemini Image** in the Web UI, then enter a Base URL, API key, and model name. The model is not fixed; it may be an official model or an identifier supplied by a compatible proxy.

@@ -26,12 +26,36 @@ const CUSTOM_SIZE_MATRIX = {
 };
 const CUSTOM_RESOLUTION_TIERS = ['1K', '2K', '4K'];
 
+// GPT Image 2.6 的新参数，取值来自 OpenAI 官方 API 参考和图像生成指南（2026-11），
+// 与 image_client_core/models.py 的 build_gpt_image_format_options 一一对应。
+const GPT_IMAGE_26_OUTPUT_FORMATS = ['', 'gif', 'svg'];
+const GPT_IMAGE_26_COMPLEXITIES = ['', 'low', 'medium', 'high'];
+const SVG_REASONING_EFFORTS = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const GIF_FRAME_COUNT = { min: 2, max: 16, fallback: 9 };
+const GIF_FRAME_DURATION_MS = { min: 20, max: 2000, fallback: 200 };
+const GPT_IMAGE_26_HINTS = {
+  '': '复杂度决定模型动笔前想多少，和画质无关；越高越慢，也可能改动更多细节。',
+  gif: 'GIF 每一帧都按上面选的尺寸生成，帧数越多越容易超出上游像素上限，建议用 1K 档。GIF 不能再拿来当参考图。',
+  svg: 'SVG 只支持文生图，一次只出 1 张：上游先画一张参考图，再由文本模型改写成矢量图。SVG 编写模型只有账号开通了「SVG 模型选择」才需要填，否则留空。',
+};
+
+function isGptImage26Model(model) {
+  return /^gpt-image-2\.6(?:-|$)/i.test(String(model || '').trim());
+}
+
 const PROTOCOL_CONFIG = {
   'openai-image': {
     backendProtocol: 'openai',
     defaultModel: 'gpt-image-2',
-    models: ['gpt-image-2', 'gpt-image-2.5', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'],
-    description: 'OpenAI 生图使用 Images API，支持 gpt-image-2 与 gpt-image-2.5 系列，尺寸按画幅比例和输出档位选择。',
+    models: [
+      'gpt-image-2',
+      'gpt-image-2.5',
+      'gpt-image-2.5-flare',
+      'gpt-image-2.5-sunburst',
+      'gpt-image-2.6-sunburst',
+      'gpt-image-2.6-flare',
+    ],
+    description: 'OpenAI 生图使用 Images API，支持 gpt-image-2、2.5 与 2.6 系列；选 2.6 时可设置复杂度并输出 GIF 动图或 SVG 矢量图。',
     promptPlaceholder: '例如: A professional minimalist workspace, cinematic lighting...',
     promptLabel: '提示词 (Prompt)',
     generateLabel: '文生图 (Generate)',
@@ -155,6 +179,12 @@ const DEFAULT_SETTINGS = {
   customModel: '',
   customRatio: '1:1',
   customResolution: '1K',
+  outputFormat: '',
+  complexity: '',
+  frameCount: GIF_FRAME_COUNT.fallback,
+  frameDurationMs: GIF_FRAME_DURATION_MS.fallback,
+  svgModel: '',
+  svgReasoningEffort: '',
 };
 
 const els = Object.fromEntries([
@@ -172,6 +202,8 @@ const els = Object.fromEntries([
   'meta-status', 'request-hint', 'request-message', 'request-elapsed', 'history-list',
   'lightbox', 'lightbox-backdrop', 'lightbox-title', 'lightbox-close',
   'lightbox-image', 'lightbox-video',
+  'gpt-image-26-options', 'output_format', 'complexity', 'gif-options', 'frame_count',
+  'frame_duration_ms', 'svg-options', 'svg_model', 'svg_reasoning_effort', 'gpt-image-26-hint',
 ].map((id) => [id, document.getElementById(id)]));
 
 let currentMode = 'generate';
@@ -283,6 +315,17 @@ function loadSettings() {
       customModel: typeof parsed.customModel === 'string' ? parsed.customModel.slice(0, 200).trim() : '',
       customRatio,
       customResolution,
+      outputFormat: GPT_IMAGE_26_OUTPUT_FORMATS.includes(parsed.outputFormat) ? parsed.outputFormat : '',
+      complexity: GPT_IMAGE_26_COMPLEXITIES.includes(parsed.complexity) ? parsed.complexity : '',
+      frameCount: clampInt(parsed.frameCount, GIF_FRAME_COUNT.min, GIF_FRAME_COUNT.max, GIF_FRAME_COUNT.fallback),
+      frameDurationMs: clampInt(
+        parsed.frameDurationMs,
+        GIF_FRAME_DURATION_MS.min,
+        GIF_FRAME_DURATION_MS.max,
+        GIF_FRAME_DURATION_MS.fallback,
+      ),
+      svgModel: typeof parsed.svgModel === 'string' ? parsed.svgModel.slice(0, 200).trim() : '',
+      svgReasoningEffort: SVG_REASONING_EFFORTS.includes(parsed.svgReasoningEffort) ? parsed.svgReasoningEffort : '',
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -303,6 +346,17 @@ function persistSettings() {
     timeout: clampInt(els.timeout.value, 5, 600, 500),
     videoResolution: els.video_resolution.value,
     duration: clampInt(els.duration.value, 1, 15, 10),
+    outputFormat: els.output_format.value,
+    complexity: els.complexity.value,
+    frameCount: clampInt(els.frame_count.value, GIF_FRAME_COUNT.min, GIF_FRAME_COUNT.max, GIF_FRAME_COUNT.fallback),
+    frameDurationMs: clampInt(
+      els.frame_duration_ms.value,
+      GIF_FRAME_DURATION_MS.min,
+      GIF_FRAME_DURATION_MS.max,
+      GIF_FRAME_DURATION_MS.fallback,
+    ),
+    svgModel: els.svg_model.value.trim(),
+    svgReasoningEffort: els.svg_reasoning_effort.value,
   };
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
@@ -419,6 +473,25 @@ function updateModelOptions(config, preferredModel) {
   els.model.value = config.models.includes(currentValue) ? currentValue : config.defaultModel;
 }
 
+// 只有「OpenAI 生图」里选了 2.6 系列模型才显示这组选项；其余情况一律按默认 PNG 发送，
+// 这样切回旧模型时不会把 2.6 才认识的字段带给上游。
+function gptImage26OptionsActive() {
+  return getSelectedProtocol() === 'openai-image' && isGptImage26Model(els.model.value);
+}
+
+function getRequestOutputFormat() {
+  return gptImage26OptionsActive() ? els.output_format.value : '';
+}
+
+function updateGptImage26Options() {
+  const active = gptImage26OptionsActive();
+  const outputFormat = els.output_format.value;
+  els['gpt-image-26-options'].classList.toggle('hidden', !active);
+  els['gif-options'].classList.toggle('hidden', !active || outputFormat !== 'gif');
+  els['svg-options'].classList.toggle('hidden', !active || outputFormat !== 'svg');
+  els['gpt-image-26-hint'].textContent = GPT_IMAGE_26_HINTS[outputFormat] || GPT_IMAGE_26_HINTS[''];
+}
+
 function updateCustomResolutionOptions() {
   const sizes = CUSTOM_SIZE_MATRIX[els.custom_ratio.value] || CUSTOM_SIZE_MATRIX[DEFAULT_SETTINGS.customRatio];
   Array.from(els.custom_resolution.options).forEach((option, index) => {
@@ -454,6 +527,7 @@ function applyProtocolPreset(preferredModel) {
     els.custom_model.placeholder = config.modelPlaceholder || '请输入模型名称';
   }
   updateCustomResolutionOptions();
+  updateGptImage26Options();
 
   els['protocol-desc'].textContent = config.description;
   els['mode-label'].textContent = config.modeLabel;
@@ -721,7 +795,7 @@ function mediaExtension(source, type) {
     const pathname = new URL(String(source), window.location.href).pathname;
     const extension = pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase();
     if (type === 'video' && ['mp4', 'webm'].includes(extension)) return extension;
-    if (type === 'image' && ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extension)) {
+    if (type === 'image' && ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'].includes(extension)) {
       return extension === 'jpeg' ? 'jpg' : extension;
     }
   } catch {
@@ -789,7 +863,9 @@ function createMediaCard(source, type, index, entry) {
   const controls = document.createElement('div');
   controls.className = 'flex items-center gap-2 shrink-0';
 
-  if (!isVideo) {
+  // GIF 动图和 SVG 矢量图不是上游接受的参考图格式（只收 PNG / JPG / WEBP），不给复用入口。
+  const canReuse = !isVideo && !['gif', 'svg'].includes(mediaExtension(source, type));
+  if (canReuse) {
     // 只有图片能当参考图。生成的视频不能，但生成的图片可以喂给 grok-video。
     const reuse = document.createElement('button');
     reuse.type = 'button';
@@ -826,7 +902,11 @@ function createHistoryEntry(entry) {
   title.textContent = `${PROTOCOL_CONFIG[entry.protocol].isVideo ? '视频' : '图像'}任务 · ${entry.mode === 'edit' ? '参考图模式' : '生成模式'}`;
   const metadata = document.createElement('p');
   metadata.className = 'mt-1 text-[11px] font-mono text-zinc-600 break-all';
-  metadata.append(`${[entry.model, entry.size, `n=${entry.count}`].filter(Boolean).join(' · ')} · `);
+  metadata.append(
+    `${[entry.model, entry.size, `n=${entry.count}`, entry.outputFormat ? entry.outputFormat.toUpperCase() : '']
+      .filter(Boolean)
+      .join(' · ')} · `,
+  );
   const elapsed = document.createElement('span');
   elapsed.dataset.entryElapsed = '';
   elapsed.textContent = formatElapsed(entry.elapsedMs || 0);
@@ -898,6 +978,7 @@ function historyEntrySignature(entry) {
     entry.jobId || '',
     entry.images.join(' '),
     entry.videos.join(' '),
+    entry.outputFormat || '',
   ].join('|');
 }
 
@@ -956,6 +1037,30 @@ async function createPayload() {
     payload.aspect_ratio = els.custom_ratio.value;
     payload.resolution = els.custom_resolution.value;
   }
+  if (gptImage26OptionsActive()) {
+    const outputFormat = getRequestOutputFormat();
+    if (outputFormat) payload.output_format = outputFormat;
+    if (els.complexity.value) payload.complexity = els.complexity.value;
+    if (outputFormat === 'gif') {
+      payload.frame_count = clampInt(
+        els.frame_count.value,
+        GIF_FRAME_COUNT.min,
+        GIF_FRAME_COUNT.max,
+        GIF_FRAME_COUNT.fallback,
+      );
+      payload.frame_duration_ms = clampInt(
+        els.frame_duration_ms.value,
+        GIF_FRAME_DURATION_MS.min,
+        GIF_FRAME_DURATION_MS.max,
+        GIF_FRAME_DURATION_MS.fallback,
+      );
+    }
+    if (outputFormat === 'svg') {
+      const svgModel = els.svg_model.value.trim();
+      if (svgModel) payload.svg_model = svgModel;
+      if (svgModel && els.svg_reasoning_effort.value) payload.svg_reasoning_effort = els.svg_reasoning_effort.value;
+    }
+  }
   if (config.isVideo) {
     payload.video_resolution = els.video_resolution.value || '720p';
     payload.duration = clampInt(els.duration.value, 1, 15, 10);
@@ -976,6 +1081,10 @@ function validatePayload(payload) {
   if (payload.mode === 'edit' && payload.edit_images.length > getProtocolConfig().maxReferenceImages) {
     return `当前协议最多上传 ${getProtocolConfig().maxReferenceImages} 张参考图`;
   }
+  if (payload.output_format === 'svg' && payload.mode === 'edit') {
+    return 'SVG 只支持文生图：请切回「文生图」，或把输出格式换成 PNG / GIF';
+  }
+  if (payload.output_format === 'svg' && payload.n !== 1) return 'SVG 一次只能生成 1 张，请把生成张数改成 1';
   return '';
 }
 
@@ -1127,6 +1236,7 @@ async function submitGeneration(event) {
     model: payload.model,
     size: payload.size,
     count: payload.n,
+    outputFormat: payload.output_format || '',
     prompt: payload.prompt,
     images: [],
     videos: [],
@@ -1244,6 +1354,12 @@ function hydrateSettings() {
   els.custom_model.value = settings.customModel;
   els.custom_ratio.value = settings.customRatio;
   els.custom_resolution.value = settings.customResolution;
+  els.output_format.value = settings.outputFormat;
+  els.complexity.value = settings.complexity;
+  els.frame_count.value = String(settings.frameCount);
+  els.frame_duration_ms.value = String(settings.frameDurationMs);
+  els.svg_model.value = settings.svgModel;
+  els.svg_reasoning_effort.value = settings.svgReasoningEffort;
   applyProtocolPreset(settings.model);
 }
 
@@ -1306,9 +1422,32 @@ function bindEvents() {
   for (const id of [
     'base_url', 'model', 'size', 'custom_model', 'custom_resolution',
     'image_count', 'timeout', 'video_resolution', 'duration',
+    'complexity', 'frame_count', 'frame_duration_ms', 'svg_model', 'svg_reasoning_effort',
   ]) {
     els[id].addEventListener('change', persistSettings);
   }
+  els.model.addEventListener('change', updateGptImage26Options);
+  els.output_format.addEventListener('change', () => {
+    // SVG 一次只能出 1 张，选中时直接把张数改好，省得提交时再报错。
+    if (els.output_format.value === 'svg') els.image_count.value = '1';
+    updateGptImage26Options();
+    persistSettings();
+  });
+  els.frame_count.addEventListener('blur', () => {
+    els.frame_count.value = String(
+      clampInt(els.frame_count.value, GIF_FRAME_COUNT.min, GIF_FRAME_COUNT.max, GIF_FRAME_COUNT.fallback),
+    );
+  });
+  els.frame_duration_ms.addEventListener('blur', () => {
+    els.frame_duration_ms.value = String(
+      clampInt(
+        els.frame_duration_ms.value,
+        GIF_FRAME_DURATION_MS.min,
+        GIF_FRAME_DURATION_MS.max,
+        GIF_FRAME_DURATION_MS.fallback,
+      ),
+    );
+  });
   els.custom_ratio.addEventListener('change', () => {
     updateCustomResolutionOptions();
     persistSettings();
