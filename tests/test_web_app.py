@@ -956,6 +956,7 @@ def test_video_asset_rejects_unsatisfiable_range(tmp_path, monkeypatch):
         "gpt-image-2.5",
         "gpt-image-2.5-flare",
         "gpt-image-2.5-sunburst",
+        "gpt-image-2.6",
         "gpt-image-2.6-sunburst",
         "gpt-image-2.6-flare",
     ],

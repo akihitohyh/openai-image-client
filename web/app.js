@@ -52,6 +52,7 @@ const PROTOCOL_CONFIG = {
       'gpt-image-2.5',
       'gpt-image-2.5-flare',
       'gpt-image-2.5-sunburst',
+      'gpt-image-2.6',
       'gpt-image-2.6-sunburst',
       'gpt-image-2.6-flare',
     ],

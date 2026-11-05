@@ -106,7 +106,7 @@ It listens only on `http://127.0.0.1:8000` by default. If the port is occupied, 
 
 ### GPT Image 2.6: Complexity, Animated GIF, and SVG Output
 
-Selecting `gpt-image-2.6-sunburst` or `gpt-image-2.6-flare` under **OpenAI Image** reveals the options below. Other models neither show nor send these fields. Values follow the official OpenAI [API reference](https://developers.openai.com/api/reference/resources/images/methods/generate) and [image generation guide](https://developers.openai.com/api/docs/guides/image-generation):
+Selecting `gpt-image-2.6`, `gpt-image-2.6-sunburst`, or `gpt-image-2.6-flare` under **OpenAI Image** reveals the options below. Other models neither show nor send these fields. Values follow the official OpenAI [API reference](https://developers.openai.com/api/reference/resources/images/methods/generate) and [image generation guide](https://developers.openai.com/api/docs/guides/image-generation):
 
 | Option | Request field | Values | Notes |
 | --- | --- | --- | --- |

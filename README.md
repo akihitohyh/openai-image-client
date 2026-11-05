@@ -106,7 +106,7 @@ python web_app.py
 
 ### GPT Image 2.6：复杂度、GIF 动图与 SVG 矢量图
 
-在“OpenAI 生图”中选择 `gpt-image-2.6-sunburst` 或 `gpt-image-2.6-flare` 后，会出现以下选项（其他模型不会显示，也不会发送这些字段）。取值以 OpenAI 官方 [API 参考](https://developers.openai.com/api/reference/resources/images/methods/generate) 和 [图像生成指南](https://developers.openai.com/api/docs/guides/image-generation) 为准：
+在“OpenAI 生图”中选择 `gpt-image-2.6`、`gpt-image-2.6-sunburst` 或 `gpt-image-2.6-flare` 后，会出现以下选项（其他模型不会显示，也不会发送这些字段）。取值以 OpenAI 官方 [API 参考](https://developers.openai.com/api/reference/resources/images/methods/generate) 和 [图像生成指南](https://developers.openai.com/api/docs/guides/image-generation) 为准：
 
 | 选项 | 请求字段 | 取值 | 说明 |
 | --- | --- | --- | --- |
