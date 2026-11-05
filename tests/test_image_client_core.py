@@ -29,6 +29,9 @@ SHARED_NAMES = {
     "grok_video_resolution_from_size",
     "is_gpt_image_2",
     "is_gpt_image_2_5",
+    "is_gpt_image_2_6",
+    "build_gpt_image_format_options",
+    "sniff_image_mime",
     "is_grok_image_model",
     "is_grok_video_model",
     "join_url",
@@ -233,3 +236,92 @@ def test_image_array_field_covers_both_gpt_image_families() -> None:
         assert models.uses_openai_image_array_field(value) is True
     for value in ("dall-e-3", "gpt-image-3", "", None):
         assert models.uses_openai_image_array_field(value) is False
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-image-2.6-sunburst", True),
+        ("gpt-image-2.6-flare", True),
+        (" GPT-Image-2.6 ", True),
+        ("gpt-image-2.5-sunburst", False),
+        ("gpt-image-2.60", False),
+        ("gpt-image-2", False),
+    ],
+)
+def test_gpt_image_2_6_family_detection(model, expected):
+    assert models.is_gpt_image_2_6(model) is expected
+
+
+def test_gpt_image_2_6_uses_the_array_upload_field():
+    assert models.uses_openai_image_array_field("gpt-image-2.6-flare")
+
+
+def test_format_options_pass_complexity_and_gif_frames():
+    options = models.build_gpt_image_format_options(
+        output_format="gif", complexity="Medium", frame_count="12", frame_duration_ms=150
+    )
+    assert options == {"complexity": "medium", "frame_count": 12, "frame_duration_ms": 150}
+
+
+def test_format_options_omit_auto_and_empty_values():
+    assert models.build_gpt_image_format_options(complexity="auto") == {}
+    assert models.build_gpt_image_format_options(output_format="gif") == {}
+    assert models.build_gpt_image_format_options(output_format="png", complexity="") == {}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"complexity": "extreme"}, "complexity"),
+        ({"output_format": "gif", "frame_count": 1}, "frame_count"),
+        ({"output_format": "gif", "frame_count": 17}, "frame_count"),
+        ({"output_format": "gif", "frame_count": True}, "frame_count"),
+        ({"output_format": "gif", "frame_duration_ms": 10}, "frame_duration_ms"),
+        ({"output_format": "gif", "frame_duration_ms": 2001}, "frame_duration_ms"),
+        ({"output_format": "png", "frame_count": 9}, "output_format=gif"),
+        ({"output_format": "png", "svg_model": "gpt-6.1-sol"}, "output_format=svg"),
+        ({"output_format": "gif", "stream": True}, "流式"),
+        ({"output_format": "svg", "stream": True}, "流式"),
+        ({"output_format": "gif", "background": "transparent"}, "透明背景"),
+        ({"output_format": "svg", "mode": "edit"}, "文生图"),
+        ({"output_format": "svg", "image_count": 2}, "1 张"),
+        ({"output_format": "svg", "svg_reasoning_effort": "low"}, "SVG 编写模型"),
+        ({"output_format": "svg", "svg_model": "m", "svg_reasoning_effort": "huge"}, "svg_reasoning_effort"),
+    ],
+)
+def test_format_options_enforce_documented_limits(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        models.build_gpt_image_format_options(**kwargs)
+
+
+def test_gif_is_allowed_for_edits():
+    # API 参考的 /v1/images/edits 同样列出 gif 与 frame_count，不在客户端拦截。
+    assert models.build_gpt_image_format_options(output_format="gif", mode="edit", frame_count=4) == {
+        "frame_count": 4
+    }
+
+
+def test_svg_author_object_is_only_sent_when_a_model_is_given():
+    assert models.build_gpt_image_format_options(output_format="svg") == {}
+    assert models.build_gpt_image_format_options(
+        output_format="svg", svg_model="gpt-6.1-sol", svg_reasoning_effort="High"
+    ) == {"svg": {"model": "gpt-6.1-sol", "reasoning": {"effort": "high"}}}
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b"\x89PNG\r\n\x1a\n....", "image/png"),
+        (b"\xff\xd8\xff\xe0....", "image/jpeg"),
+        (b"GIF89a....", "image/gif"),
+        (b"GIF87a....", "image/gif"),
+        (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "image/webp"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg"/>', "image/svg+xml"),
+        (b'\xef\xbb\xbf <?xml version="1.0"?>\n<!-- c -->\n<svg/>', "image/svg+xml"),
+        (b"<html><body>error</body></html>", None),
+        (b"not an image", None),
+    ],
+)
+def test_sniff_image_mime(data, expected):
+    assert models.sniff_image_mime(data) == expected

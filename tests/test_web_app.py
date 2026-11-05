@@ -951,7 +951,15 @@ def test_video_asset_rejects_unsatisfiable_range(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "model",
-    ["gpt-image-2", "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"],
+    [
+        "gpt-image-2",
+        "gpt-image-2.5",
+        "gpt-image-2.5-flare",
+        "gpt-image-2.5-sunburst",
+        "gpt-image-2.6",
+        "gpt-image-2.6-sunburst",
+        "gpt-image-2.6-flare",
+    ],
 )
 def test_gpt_image_families_use_the_array_upload_field(model):
     # 单张参考图是唯一会分叉的情况：多张时两条分支都会走 image[]。
@@ -970,3 +978,140 @@ def test_transparent_background_rejection_stays_scoped_to_gpt_image_2():
         web_app.apply_openai_image_options(body, {"background": "transparent"}, "gpt-image-2")
     web_app.apply_openai_image_options(body, {"background": "transparent"}, "gpt-image-2.5")
     assert body["background"] == "transparent"
+
+
+def _capture_image_request(monkeypatch):
+    captured = {}
+
+    def fake_request_image_api(base_url, api_key, timeout, route, **kwargs):
+        captured.update(route=route, **kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(web_app, "request_image_api", fake_request_image_api)
+    return captured
+
+
+def test_gif_generation_sends_official_gif_fields(monkeypatch):
+    captured = _capture_image_request(monkeypatch)
+    web_app.generate_images(
+        valid_payload(
+            model="gpt-image-2.6-sunburst",
+            output_format="gif",
+            complexity="low",
+            frame_count=12,
+            frame_duration_ms=150,
+        )
+    )
+    body = captured["json_body"]
+    assert captured["route"] == "images/generations"
+    assert body["output_format"] == "gif"
+    assert body["complexity"] == "low"
+    assert body["frame_count"] == 12
+    assert body["frame_duration_ms"] == 150
+    assert "output_compression" not in body
+
+
+def test_svg_generation_sends_the_svg_author_object(monkeypatch):
+    captured = _capture_image_request(monkeypatch)
+    web_app.generate_images(
+        valid_payload(
+            model="gpt-image-2.6-flare",
+            output_format="svg",
+            svg_model="gpt-6.1-sol",
+            svg_reasoning_effort="medium",
+        )
+    )
+    body = captured["json_body"]
+    assert body["output_format"] == "svg"
+    assert body["svg"] == {"model": "gpt-6.1-sol", "reasoning": {"effort": "medium"}}
+
+
+def test_gif_edit_sends_frames_as_form_fields(monkeypatch):
+    captured = _capture_image_request(monkeypatch)
+    png = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+    web_app.edit_images(
+        valid_payload(
+            mode="edit",
+            model="gpt-image-2.6-sunburst",
+            output_format="gif",
+            frame_count=6,
+            edit_images=[{"name": "ref.png", "data_url": png}],
+        )
+    )
+    assert captured["route"] == "images/edits"
+    assert captured["form_data"]["output_format"] == "gif"
+    assert captured["form_data"]["frame_count"] == "6"
+    assert captured["files"][0][0] == "image[]"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"output_format": "svg", "n": 2}, "1 张"),
+        ({"output_format": "svg", "mode": "edit", "edit_images": [{"data_url": "data:image/png;base64,AA=="}]}, "文生图"),
+        ({"output_format": "png", "frame_count": 9}, "output_format=gif"),
+        ({"output_format": "gif", "frame_count": 40}, "frame_count"),
+        ({"output_format": "svg", "svg_model": "x" * 201}, "svg_model"),
+    ],
+)
+def test_gpt_image_2_6_limits_are_checked_before_queueing(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        web_app.validate_request_payload(valid_payload(model="gpt-image-2.6-sunburst", **overrides))
+
+
+def test_gif_and_svg_reject_the_streaming_endpoint():
+    for output_format in ("gif", "svg"):
+        with pytest.raises(ValueError, match="流式"):
+            web_app.build_stream_request(valid_payload(model="gpt-image-2.6-flare", output_format=output_format))
+
+
+def test_svg_and_gif_results_get_their_real_mime_type():
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+    # 官方把 output_format 放在响应顶层，data[] 元素里没有
+    images = web_app.parse_image_api_response(
+        {"output_format": "svg", "data": [{"b64_json": base64.b64encode(svg).decode()}]}, 5, "cid", "endpoint"
+    )
+    assert images[0].startswith("data:image/svg+xml;base64,")
+    # 中转站丢掉 output_format 时按文件头识别
+    gif = b"GIF89a\x01\x00\x01\x00"
+    images = web_app.parse_image_api_response(
+        {"data": [{"b64_json": base64.b64encode(gif).decode()}]}, 5, "cid", "endpoint"
+    )
+    assert images[0].startswith("data:image/gif;base64,")
+
+
+def test_svg_result_is_materialized_with_an_svg_suffix(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "ASSET_ROOT", tmp_path)
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+    data_url = "data:image/svg+xml;base64," + base64.b64encode(svg).decode()
+    stored = web_app.materialize_job_result("job-id", {"images": [data_url], "videos": []})
+    assert stored["images"] == ["/api/assets/job-id/image-1.svg"]
+    assert (tmp_path / "job-id" / "image-1.svg").read_bytes() == svg
+
+
+def test_svg_asset_is_served_with_a_sandboxing_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "ASSET_ROOT", tmp_path)
+    job_id = "22222222-2222-2222-2222-222222222222"
+    (tmp_path / job_id).mkdir(parents=True)
+    (tmp_path / job_id / "image-1.svg").write_bytes(b"<svg/>")
+    monkeypatch.setattr(web_app, "get_async_job", lambda _id: {"status": "success"})
+
+    handler = object.__new__(web_app.AppHandler)
+    handler.path = f"/api/assets/{job_id}/image-1.svg"
+    handler.request_version = "HTTP/1.1"
+    handler.server = SimpleNamespace(frame_ancestors="*", x_frame_options=None)
+    handler.headers = {}
+    handler._headers_buffer = []
+    handler.wfile = BytesIO()
+    handler.send_response = MethodType(
+        lambda self, code, message=None: self._headers_buffer.append(f"STATUS {code}"), handler
+    )
+    handler.send_header = MethodType(
+        lambda self, key, value: self._headers_buffer.append(f"{key}: {value}"), handler
+    )
+    handler.end_headers = MethodType(lambda self: None, handler)
+    handler._send_asset(job_id, "image-1.svg")
+    sent = handler._headers_buffer
+    assert "Content-Type: image/svg+xml" in sent
+    assert any(line.startswith("Content-Security-Policy:") and "sandbox" in line for line in sent)
+    assert handler.wfile.getvalue() == b"<svg/>"
