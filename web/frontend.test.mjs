@@ -318,3 +318,75 @@ test('SVG requests are rejected for edits and multiple outputs before submission
   assert.match(body, /payload\.output_format === 'svg' && payload\.mode === 'edit'/);
   assert.match(body, /payload\.output_format === 'svg' && payload\.n !== 1/);
 });
+
+test('task history is persisted in IndexedDB and restored on load', () => {
+  assert.match(appJs, /indexedDB\.open\(HISTORY_DB_NAME, HISTORY_DB_VERSION\)/);
+  assert.match(appJs, /createObjectStore\(HISTORY_STORE, \{ keyPath: 'id' \}\)/);
+  assert.match(appJs, /void persistHistoryEntry\(entry\);/);
+  assert.match(appJs, /renderHistory\(\);\nvoid loadStoredHistory\(\);/);
+  assert.match(appJs, /void clearStoredHistory\(\);/);
+  assert.match(appJs, /store\.clear\(\)/);
+  // 只存已结束的任务；运行中的任务刷新后无法续上，不写进本地。
+  assert.match(appJs, /STORED_HISTORY_STATUSES = new Set\(\['success', 'error', 'cancelled'\]\)/);
+});
+
+function extractFunction(name) {
+  const source = appJs.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`))?.[0];
+  assert.ok(source, `${name} must exist`);
+  return source;
+}
+
+test('history records keep task fields and media blobs, and restore to object URLs', () => {
+  const fields = appJs.match(/const HISTORY_RECORD_FIELDS = (\[[\s\S]*?\]);/)?.[1];
+  assert.ok(fields, 'HISTORY_RECORD_FIELDS must exist');
+  class FakeBlob {}
+  const created = [];
+  const context = {
+    Blob: FakeBlob,
+    Date,
+    Number,
+    Array,
+    URL: { createObjectURL: (blob) => { created.push(blob); return `blob:test/${created.length}`; } },
+    historyObjectUrls: new Map(),
+    objectUrlMedia: new Map(),
+  };
+  vm.createContext(context);
+  vm.runInContext(
+    `const HISTORY_RECORD_FIELDS = ${fields};\n${extractFunction('serializeHistoryEntry')}\n${extractFunction('restoreHistoryRecord')}`,
+    context,
+  );
+  const imageBlob = new FakeBlob();
+  const entry = {
+    id: 'local-1', jobId: 'job-1', status: 'success', startedAt: 10, createdAt: 10, elapsedMs: 5,
+    durationMs: 4, endpoint: '/v1/images/generations', protocol: 'openai', mode: 'generate',
+    model: 'gpt-image-2', size: '2160x3840', count: 2, outputFormat: 'png', prompt: 'cat', errorMessage: '',
+    images: ['/api/assets/job-1/image-1.png'], videos: [], apiKey: 'must-not-be-stored',
+  };
+  const media = [
+    { type: 'image', extension: 'png', blob: imageBlob },
+    { type: 'video', extension: 'mp4', url: 'https://cdn.example/v.mp4' },
+  ];
+  const record = context.serializeHistoryEntry(entry, media);
+  assert.equal(record.prompt, 'cat');
+  assert.equal(record.apiKey, undefined);
+  assert.equal(record.images, undefined);
+  assert.equal(record.media, media);
+
+  const restored = context.restoreHistoryRecord(record);
+  assert.deepEqual([...restored.images], ['blob:test/1']);
+  assert.deepEqual([...restored.videos], ['https://cdn.example/v.mp4']);
+  assert.equal(created[0], imageBlob);
+  assert.equal(context.objectUrlMedia.get('blob:test/1').extension, 'png');
+  assert.equal(context.objectUrlMedia.get('blob:test/1').blob, imageBlob);
+  assert.deepEqual([...context.historyObjectUrls.get('local-1')], ['blob:test/1']);
+  assert.equal(restored.durationMs, 4);
+  assert.equal(restored.count, 2);
+});
+
+test('blob history sources keep their stored file extension', () => {
+  const body = extractFunction('mediaExtension');
+  assert.match(body, /objectUrlMedia\.get\(String\(source\)\)\?\.extension/);
+  // 页面 CSP 的 connect-src 不含 blob:，复用本地历史里的图时不能 fetch blob 地址。
+  assert.match(extractFunction('reuseGeneratedImage'), /if \(storedMedia\) \{[\s\S]*?new File\(\[storedMedia\.blob\]/);
+});
+

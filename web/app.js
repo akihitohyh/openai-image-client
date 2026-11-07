@@ -217,6 +217,185 @@ let lastFocusedElement = null;
 // entry.id -> { node, signature }，用于历史列表的增量渲染
 const historyNodes = new Map();
 
+// 任务历史保存在浏览器 IndexedDB 里，刷新或重开页面后还在。服务端生成结果只保留
+// 1 小时（JOB_TTL_SECONDS），所以存的是媒体本身（Blob），不是会过期的 /api/assets 链接。
+// 取不回来的远程直链（跨域）只能存链接，过期后会失效。
+const HISTORY_DB_NAME = 'openai-image-client-web';
+const HISTORY_DB_VERSION = 1;
+const HISTORY_STORE = 'history';
+const STORED_HISTORY_STATUSES = new Set(['success', 'error', 'cancelled']);
+const HISTORY_RECORD_FIELDS = [
+  'id', 'jobId', 'status', 'startedAt', 'createdAt', 'elapsedMs', 'durationMs', 'endpoint',
+  'protocol', 'mode', 'model', 'size', 'count', 'outputFormat', 'prompt', 'errorMessage',
+];
+// entry.id -> 这条记录创建的 blob: 地址，记录移出列表时释放
+const historyObjectUrls = new Map();
+// blob: 地址 -> { blob, extension }。地址本身看不出扩展名，下载文件名和"能否用作参考图"
+// 都靠这里；页面 CSP 的 connect-src 不含 blob:，复用为参考图时也直接取这里的 Blob。
+const objectUrlMedia = new Map();
+let historyDbPromise = null;
+// 每次清空历史加一，让清空前就开始保存的记录不再写回去
+let historyClearGeneration = 0;
+
+function openHistoryDb() {
+  if (historyDbPromise) return historyDbPromise;
+  historyDbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('浏览器不支持 IndexedDB'));
+      return;
+    }
+    const request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HISTORY_STORE)) db.createObjectStore(HISTORY_STORE, { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('无法打开本地历史库'));
+    request.onblocked = () => reject(new Error('本地历史库被其他标签页占用，请关闭旧标签页后重试'));
+  });
+  // 打开失败（隐私模式、被禁用）时允许下次重试，而不是永远拿到同一个 rejected promise。
+  historyDbPromise.catch(() => {
+    historyDbPromise = null;
+  });
+  return historyDbPromise;
+}
+
+async function withHistoryStore(mode, run) {
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(HISTORY_STORE, mode);
+    const request = run(transaction.objectStore(HISTORY_STORE));
+    transaction.oncomplete = () => resolve(request?.result);
+    transaction.onerror = () => reject(transaction.error || new Error('本地历史读写失败'));
+    transaction.onabort = () => reject(transaction.error || new Error('本地历史读写被中止，可能是浏览器存储空间不足'));
+  });
+}
+
+function serializeHistoryEntry(entry, media) {
+  const record = {};
+  for (const field of HISTORY_RECORD_FIELDS) record[field] = entry[field] ?? null;
+  record.media = media;
+  return record;
+}
+
+async function captureEntryMedia(entry) {
+  const items = [
+    ...entry.images.map((source) => ({ source, type: 'image' })),
+    ...entry.videos.map((source) => ({ source, type: 'video' })),
+  ];
+  return Promise.all(items.map(async ({ source, type }) => {
+    const extension = mediaExtension(source, type);
+    try {
+      const response = await fetch(source, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return { type, extension, blob: await response.blob() };
+    } catch {
+      return { type, extension, url: String(source) };
+    }
+  }));
+}
+
+function restoreHistoryRecord(record) {
+  const images = [];
+  const videos = [];
+  const objectUrls = [];
+  for (const item of Array.isArray(record.media) ? record.media : []) {
+    let source = typeof item?.url === 'string' ? item.url : '';
+    if (item?.blob instanceof Blob) {
+      source = URL.createObjectURL(item.blob);
+      objectUrls.push(source);
+      objectUrlMedia.set(source, { blob: item.blob, extension: item.extension || (item.type === 'video' ? 'mp4' : 'png') });
+    }
+    if (!source) continue;
+    (item.type === 'video' ? videos : images).push(source);
+  }
+  historyObjectUrls.set(record.id, objectUrls);
+  const entry = {};
+  for (const field of HISTORY_RECORD_FIELDS) entry[field] = record[field] ?? '';
+  return {
+    ...entry,
+    startedAt: Number(record.startedAt || record.createdAt) || Date.now(),
+    createdAt: Number(record.createdAt) || Date.now(),
+    elapsedMs: Number(record.elapsedMs) || 0,
+    durationMs: Number.isFinite(Number(record.durationMs)) && record.durationMs !== null ? Number(record.durationMs) : null,
+    count: Number(record.count) || images.length + videos.length || 1,
+    images,
+    videos,
+  };
+}
+
+function releaseHistoryEntryUrls(entryId) {
+  for (const url of historyObjectUrls.get(entryId) || []) {
+    URL.revokeObjectURL(url);
+    objectUrlMedia.delete(url);
+  }
+  historyObjectUrls.delete(entryId);
+}
+
+function setHistoryEntries(entries) {
+  const kept = entries.slice(0, HISTORY_LIMIT);
+  const keptIds = new Set(kept.map((entry) => entry.id));
+  for (const entry of historyEntries) {
+    if (!keptIds.has(entry.id)) releaseHistoryEntryUrls(entry.id);
+  }
+  historyEntries = kept;
+}
+
+async function pruneStoredHistory() {
+  const records = await withHistoryStore('readonly', (store) => store.getAll());
+  const stale = (records || [])
+    .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0))
+    .slice(HISTORY_LIMIT);
+  if (!stale.length) return;
+  await withHistoryStore('readwrite', (store) => {
+    let last = null;
+    for (const record of stale) last = store.delete(record.id);
+    return last;
+  });
+}
+
+async function persistHistoryEntry(entry) {
+  if (!STORED_HISTORY_STATUSES.has(entry.status)) return;
+  const generation = historyClearGeneration;
+  try {
+    const media = await captureEntryMedia(entry);
+    if (generation !== historyClearGeneration) return;
+    await withHistoryStore('readwrite', (store) => store.put(serializeHistoryEntry(entry, media)));
+    await pruneStoredHistory();
+  } catch (error) {
+    setStatus(`结果已显示，但没能保存到本地浏览器：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function loadStoredHistory() {
+  let records;
+  try {
+    records = await withHistoryStore('readonly', (store) => store.getAll());
+  } catch (error) {
+    console.warn('无法读取本地任务历史', error);
+    return;
+  }
+  const liveIds = new Set(historyEntries.map((entry) => entry.id));
+  const restored = (records || [])
+    .filter((record) => record && STORED_HISTORY_STATUSES.has(record.status) && !liveIds.has(record.id))
+    .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0))
+    .slice(0, HISTORY_LIMIT)
+    .map(restoreHistoryRecord);
+  if (!restored.length) return;
+  // 读取期间可能已经提交了新任务：新任务在前，本地记录接在后面。
+  setHistoryEntries([...historyEntries, ...restored]);
+  renderHistory();
+}
+
+async function clearStoredHistory() {
+  historyClearGeneration += 1;
+  try {
+    await withHistoryStore('readwrite', (store) => store.clear());
+  } catch (error) {
+    setStatus(`任务历史已清空，但本地记录没能删除：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function clampInt(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
@@ -629,21 +808,29 @@ async function reuseGeneratedImage(source, label) {
   setStatus(`正在取回${label}…`);
 
   let file;
+  const storedMedia = objectUrlMedia.get(String(source));
   try {
-    const response = await fetch(source, { cache: 'no-store' });
-    if (!response.ok) {
-      // 生成结果只在服务端保留 1 小时（JOB_TTL_SECONDS），过期后资产接口返回 404。
-      throw new Error(
-        response.status === 404
-          ? '生成结果已过期（服务端只保留 1 小时），请重新生成后再复用'
-          : `取回失败：HTTP ${response.status}`,
-      );
+    if (storedMedia) {
+      // 本地历史里恢复的图：直接用存下来的 Blob，不经过 fetch。
+      file = new File([storedMedia.blob], `generated-image.${storedMedia.extension}`, {
+        type: storedMedia.blob.type || 'image/png',
+      });
+    } else {
+      const response = await fetch(source, { cache: 'no-store' });
+      if (!response.ok) {
+        // 生成结果只在服务端保留 1 小时（JOB_TTL_SECONDS），过期后资产接口返回 404。
+        throw new Error(
+          response.status === 404
+            ? '生成结果已过期（服务端只保留 1 小时），请重新生成后再复用'
+            : `取回失败：HTTP ${response.status}`,
+        );
+      }
+      const blob = await response.blob();
+      const fileName =
+        decodeURIComponent(new URL(source, window.location.href).pathname.split('/').pop() || '') ||
+        'generated-image.png';
+      file = new File([blob], fileName, { type: blob.type || 'image/png' });
     }
-    const blob = await response.blob();
-    const fileName =
-      decodeURIComponent(new URL(source, window.location.href).pathname.split('/').pop() || '') ||
-      'generated-image.png';
-    file = new File([blob], fileName, { type: blob.type || 'image/png' });
   } catch (error) {
     showError(
       '无法复用这张图片',
@@ -790,6 +977,8 @@ function statusPresentation(status) {
 }
 
 function mediaExtension(source, type) {
+  const stored = objectUrlMedia.get(String(source))?.extension;
+  if (stored) return stored;
   const match = String(source).match(/^data:image\/([a-z0-9.+-]+);/i);
   if (match) return match[1] === 'jpeg' ? 'jpg' : match[1].replace('svg+xml', 'svg');
   try {
@@ -1243,7 +1432,7 @@ async function submitGeneration(event) {
     videos: [],
     errorMessage: '',
   };
-  historyEntries = [entry, ...historyEntries].slice(0, HISTORY_LIMIT);
+  setHistoryEntries([entry, ...historyEntries]);
   const task = { entry, controller: new AbortController(), jobId: '', cancelRequested: false, cancelPromise: null };
   activeTask = task;
   setLoadingState(true);
@@ -1302,6 +1491,7 @@ async function submitGeneration(event) {
     }
     updateGlobalMeta(entry);
     renderHistory();
+    void persistHistoryEntry(entry);
     if (activeTask === task) activeTask = null;
     setLoadingState(false);
     els['cancel-btn'].disabled = false;
@@ -1376,11 +1566,12 @@ function bindEvents() {
   els['config-form'].addEventListener('submit', submitGeneration);
   els['cancel-btn'].addEventListener('click', cancelActiveTask);
   els['clear-history-btn'].addEventListener('click', () => {
-    historyEntries = [];
+    setHistoryEntries([]);
     hideError();
     renderHistory();
     els['meta-panel'].classList.add('hidden');
-    setStatus('任务历史已清空。');
+    setStatus('任务历史已清空，本地保存的记录也已删除。');
+    void clearStoredHistory();
   });
 
   els['reference-dropzone'].addEventListener('click', () => els['file-input'].click());
@@ -1475,4 +1666,5 @@ function bindEvents() {
 hydrateSettings();
 bindEvents();
 renderHistory();
+void loadStoredHistory();
 checkHealth();
