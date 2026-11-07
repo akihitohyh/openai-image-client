@@ -1,6 +1,8 @@
 'use strict';
 
 const STORAGE_KEY = 'openai-image-client-web:settings:v4';
+// API Key 单独存，不混进普通设置：用户取消"记住"时只删这一项。
+const API_KEY_STORAGE_KEY = 'openai-image-client-web:api-key:v1';
 const LEGACY_STORAGE_KEYS = ['openai-image-client-web:v3'];
 const POLL_INTERVAL_MS = 1500;
 const HISTORY_LIMIT = 12;
@@ -189,7 +191,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const els = Object.fromEntries([
-  'service-status', 'config-form', 'base_url', 'api_key', 'protocol', 'protocol-control',
+  'service-status', 'config-form', 'base_url', 'api_key', 'remember_api_key', 'protocol', 'protocol-control',
   'protocol-desc', 'mode-control', 'mode-label', 'mode-generate', 'mode-edit',
   'edit-image-container', 'reference-label', 'reference-dropzone', 'file-input',
   'upload-placeholder', 'upload-preview-grid', 'upload-count', 'clear-upload-btn',
@@ -542,6 +544,26 @@ function persistSettings() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // Settings persistence is optional; generation must remain usable without it.
+  }
+}
+
+function loadStoredApiKey() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(API_KEY_STORAGE_KEY) || 'null');
+    if (parsed && parsed.remember === false) return { remember: false, apiKey: '' };
+    return { remember: true, apiKey: typeof parsed?.apiKey === 'string' ? parsed.apiKey : '' };
+  } catch {
+    return { remember: true, apiKey: '' };
+  }
+}
+
+function persistApiKey() {
+  const remember = els.remember_api_key.checked;
+  const record = remember ? { remember: true, apiKey: els.api_key.value.trim() } : { remember: false };
+  try {
+    localStorage.setItem(API_KEY_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // 存储不可用时只是不记住，生成照常可用。
   }
 }
 
@@ -1392,6 +1414,7 @@ async function submitGeneration(event) {
   hideError();
   persistSettings();
 
+  persistApiKey();
   isPreparingSubmission = true;
   let payload;
   try {
@@ -1535,6 +1558,9 @@ function closeLightbox() {
 function hydrateSettings() {
   const settings = loadSettings();
   els.base_url.value = settings.baseUrl;
+  const storedApiKey = loadStoredApiKey();
+  els.remember_api_key.checked = storedApiKey.remember;
+  els.api_key.value = storedApiKey.apiKey;
   els.protocol.value = settings.protocol;
   currentMode = settings.mode;
   els.size.value = settings.size;
@@ -1618,6 +1644,8 @@ function bindEvents() {
   ]) {
     els[id].addEventListener('change', persistSettings);
   }
+  els.api_key.addEventListener('change', persistApiKey);
+  els.remember_api_key.addEventListener('change', persistApiKey);
   els.model.addEventListener('change', updateGptImage26Options);
   els.output_format.addEventListener('change', () => {
     // SVG 一次只能出 1 张，选中时直接把张数改好，省得提交时再报错。

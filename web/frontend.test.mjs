@@ -319,6 +319,38 @@ test('SVG requests are rejected for edits and multiple outputs before submission
   assert.match(body, /payload\.output_format === 'svg' && payload\.n !== 1/);
 });
 
+test('API key is remembered separately and removed when the user opts out', () => {
+  const persistBody = appJs.match(/function persistApiKey\(\) \{[\s\S]*?\n\}/)?.[0];
+  const loadBody = appJs.match(/function loadStoredApiKey\(\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(persistBody && loadBody, 'API key storage functions must exist');
+  const store = new Map();
+  const els = { remember_api_key: { checked: true }, api_key: { value: ' sk-local-test ' } };
+  const context = {
+    JSON,
+    els,
+    API_KEY_STORAGE_KEY: 'api-key',
+    localStorage: {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => store.set(key, String(value)),
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(`${persistBody}\n${loadBody}`, context);
+
+  assert.deepEqual({ ...context.loadStoredApiKey() }, { remember: true, apiKey: '' });
+  context.persistApiKey();
+  assert.deepEqual(JSON.parse(store.get('api-key')), { remember: true, apiKey: 'sk-local-test' });
+  assert.deepEqual({ ...context.loadStoredApiKey() }, { remember: true, apiKey: 'sk-local-test' });
+
+  els.remember_api_key.checked = false;
+  context.persistApiKey();
+  assert.deepEqual(JSON.parse(store.get('api-key')), { remember: false });
+  assert.deepEqual({ ...context.loadStoredApiKey() }, { remember: false, apiKey: '' });
+
+  assert.match(indexHtml, /id="remember_api_key" checked/);
+  assert.match(appJs, /els\.remember_api_key\.addEventListener\('change', persistApiKey\)/);
+});
+
 test('task history is persisted in IndexedDB and restored on load', () => {
   assert.match(appJs, /indexedDB\.open\(HISTORY_DB_NAME, HISTORY_DB_VERSION\)/);
   assert.match(appJs, /createObjectStore\(HISTORY_STORE, \{ keyPath: 'id' \}\)/);
