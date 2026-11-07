@@ -55,10 +55,10 @@
                         <div>
                             <label for="api_key" class="field-label">API Key</label>
                             <input type="password" id="api_key" required autocomplete="new-password" spellcheck="false" placeholder="sk-..." class="field font-mono">
-                            <p class="mt-1.5 text-[11px] text-zinc-600 flex items-start gap-1.5">
-                                <svg class="w-3.5 h-3.5 mt-px shrink-0 text-zinc-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 118 0v3"/></svg>
-                                <span>密钥仅用于本次请求，不会保存到浏览器。</span>
-                            </p>
+                            <label for="remember_api_key" class="mt-1.5 text-[11px] text-zinc-500 flex items-start gap-1.5 cursor-pointer">
+                                <input type="checkbox" id="remember_api_key" checked class="mt-px h-3.5 w-3.5 shrink-0 accent-accent">
+                                <span>在此浏览器记住 API Key（只存在本机浏览器；公用电脑请取消勾选，取消后立即删除）</span>
+                            </label>
                         </div>
                     </div>
                 </details>
