@@ -238,6 +238,8 @@ const objectUrlMedia = new Map();
 let historyDbPromise = null;
 // 每次清空历史加一，让清空前就开始保存的记录不再写回去
 let historyClearGeneration = 0;
+// 已被单独删除的记录：结果还在保存中时删除，保存完成也不再写回去
+const deletedHistoryIds = new Set();
 
 function openHistoryDb() {
   if (historyDbPromise) return historyDbPromise;
@@ -361,7 +363,7 @@ async function persistHistoryEntry(entry) {
   const generation = historyClearGeneration;
   try {
     const media = await captureEntryMedia(entry);
-    if (generation !== historyClearGeneration) return;
+    if (generation !== historyClearGeneration || deletedHistoryIds.has(entry.id)) return;
     await withHistoryStore('readwrite', (store) => store.put(serializeHistoryEntry(entry, media)));
     await pruneStoredHistory();
   } catch (error) {
@@ -387,6 +389,21 @@ async function loadStoredHistory() {
   // 读取期间可能已经提交了新任务：新任务在前，本地记录接在后面。
   setHistoryEntries([...historyEntries, ...restored]);
   renderHistory();
+}
+
+async function deleteHistoryEntry(entryId) {
+  const entry = historyEntries.find((item) => item.id === entryId);
+  if (!entry || !STORED_HISTORY_STATUSES.has(entry.status)) return;
+  deletedHistoryIds.add(entryId);
+  setHistoryEntries(historyEntries.filter((item) => item.id !== entryId));
+  renderHistory();
+  if (els['meta-req-id'].textContent === (entry.jobId || entry.id)) els['meta-panel'].classList.add('hidden');
+  setStatus('已删除这条任务记录。');
+  try {
+    await withHistoryStore('readwrite', (store) => store.delete(entryId));
+  } catch (error) {
+    setStatus(`已从列表删除，但本地记录没能删除：${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function clearStoredHistory() {
@@ -1130,7 +1147,21 @@ function createHistoryEntry(entry) {
   const status = document.createElement('span');
   status.className = `shrink-0 rounded px-2 py-1 text-[11px] font-semibold ${presentation.classes}`;
   status.textContent = presentation.text;
-  header.append(summary, status);
+  const badges = document.createElement('div');
+  badges.className = 'shrink-0 flex items-center gap-2';
+  // 运行中的任务不能删：结果还没回来，删掉后轮询会把它写回列表。
+  if (STORED_HISTORY_STATUSES.has(entry.status)) {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.dataset.deleteEntry = entry.id;
+    remove.className = 'rounded px-2 py-1 text-[11px] border border-white/10 bg-white/[0.04] text-zinc-400 hover:border-rose-500/30 hover:bg-rose-500/10 hover:text-rose-300 transition focus:outline-none focus:ring-2 focus:ring-rose-500/40';
+    remove.textContent = '删除';
+    remove.setAttribute('aria-label', `删除这条任务记录：${String(entry.prompt || '').slice(0, 40)}`);
+    remove.addEventListener('click', () => void deleteHistoryEntry(entry.id));
+    badges.append(remove);
+  }
+  badges.append(status);
+  header.append(summary, badges);
 
   const prompt = document.createElement('p');
   prompt.className = 'mt-3 text-xs text-zinc-400 whitespace-pre-wrap break-words leading-relaxed';
