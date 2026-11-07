@@ -422,3 +422,48 @@ test('blob history sources keep their stored file extension', () => {
   assert.match(extractFunction('reuseGeneratedImage'), /if \(storedMedia\) \{[\s\S]*?new File\(\[storedMedia\.blob\]/);
 });
 
+test('a single finished history entry can be deleted from the list and IndexedDB', async () => {
+  assert.match(appJs, /remove\.textContent = '删除';/);
+  assert.match(appJs, /remove\.addEventListener\('click', \(\) => void deleteHistoryEntry\(entry\.id\)\)/);
+  assert.match(appJs, /if \(STORED_HISTORY_STATUSES\.has\(entry\.status\)\) \{\n    const remove/);
+  assert.match(appJs, /deletedHistoryIds\.has\(entry\.id\)\) return;/);
+
+  const deleted = [];
+  const released = [];
+  const context = {
+    STORED_HISTORY_STATUSES: new Set(['success', 'error', 'cancelled']),
+    HISTORY_LIMIT: 12,
+    deletedHistoryIds: new Set(),
+    historyEntries: [
+      { id: 'a', jobId: 'job-a', status: 'success' },
+      { id: 'b', jobId: 'job-b', status: 'error' },
+      { id: 'c', jobId: '', status: 'running' },
+    ],
+    els: {
+      'meta-req-id': { textContent: 'job-a' },
+      'meta-panel': { classList: { add: (name) => { context.metaHidden = name; } } },
+    },
+    renderCount: 0,
+    renderHistory: () => { context.renderCount += 1; },
+    setStatus: (text) => { context.status = text; },
+    releaseHistoryEntryUrls: (id) => released.push(id),
+    withHistoryStore: async (mode, run) => run({ delete: (id) => { deleted.push([mode, id]); } }),
+    Error,
+    String,
+  };
+  vm.createContext(context);
+  vm.runInContext(`${extractFunction('setHistoryEntries')}\nasync ${extractFunction('deleteHistoryEntry')}`, context);
+
+  await context.deleteHistoryEntry('a');
+  assert.deepEqual(context.historyEntries.map((entry) => entry.id), ['b', 'c']);
+  assert.deepEqual(deleted, [['readwrite', 'a']]);
+  assert.deepEqual(released, ['a']);
+  assert.equal(context.metaHidden, 'hidden');
+  assert.ok(context.deletedHistoryIds.has('a'));
+  assert.equal(context.status, '已删除这条任务记录。');
+
+  await context.deleteHistoryEntry('c');
+  assert.deepEqual(context.historyEntries.map((entry) => entry.id), ['b', 'c'], 'running entries stay');
+  assert.equal(deleted.length, 1);
+});
+
